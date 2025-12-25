@@ -1,0 +1,36 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Sermon Quarantine Review</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 16px; }
+    .row { display:flex; gap:16px; }
+    .panel { border:1px solid #ddd; padding:12px; border-radius:6px; width:48%; }
+    table { width:100%; border-collapse:collapse; }
+    th, td { padding:6px; border-bottom:1px solid #eee; text-align:left; }
+    button { margin-right:8px; }
+    audio { width:100%; margin-top:8px; }
+    .low { color: #b36b00; } .bad { color:#b30000; } .good { color:#007a3d; }
+  </style>
+</head>
+<body>
+  <h2>Sermon Quarantine Dashboard</h2>
+  <div class="row">
+    <div class="panel">
+      <h3>Quarantined Files</h3>
+      <table id="files-table">
+        <thead><tr><th>Base</th><th>Score</th><th>Decision</th><th>Actions</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <button id="refresh">Refresh</button>
+    </div>
+    <div class="panel">
+      <h3>File Details</h3>
+      <div id="details">Select a file to view metadata and audio</div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
