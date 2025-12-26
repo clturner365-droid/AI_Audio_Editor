@@ -407,7 +407,7 @@ def process_file(input_path, output_dir, registry_path, config, only_list=None, 
     else:
         append_file_log(log_buffer, f"Skipped {step}")
 
-     # 14C) normalize_outro_audio (NEW - calls external module)
+    # 14C) normalize_outro_audio (NEW - calls loudness_normalizer)
     step = "normalize_outro_audio"
     if should_run(step, only_list, skip_list):
         try:
@@ -424,7 +424,6 @@ def process_file(input_path, output_dir, registry_path, config, only_list=None, 
 
             append_file_log(log_buffer, "Normalizing outro audio loudness to match sermon audio")
 
-            # Call external loudness normalization module
             normalized_outro = normalize_loudness(
                 target_audio=outro_audio,
                 reference_audio=sermon_audio,
@@ -554,6 +553,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
