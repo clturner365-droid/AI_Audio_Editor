@@ -456,42 +456,33 @@ def process_file(input_path, output_dir, registry_path, config, only_list=None, 
     else:
         append_file_log(log_buffer, f"Skipped {step}")
 
-    # 14D) assemble_final_audio (NEW)
+    # 14D) assemble_final_audio (NEW - calls external module)
     step = "assemble_final_audio"
     if should_run(step, only_list, skip_list):
-       try:
+        try:
+            from modules.final_audio_assembler import assemble_final_audio
+
+            intro_audio = state.get("intro_audio")  # optional
             sermon_audio = state.get("sermon_audio")
             outro_audio = state.get("outro_audio_normalized")
-            intro_audio = state.get("intro_audio")  # optional, may be None
 
-           if sermon_audio is None:
-                raise ValueError("No sermon_audio found in state. Sermon must be processed before 14D.")
+            if sermon_audio is None:
+                raise ValueError("assemble_final_audio: sermon_audio missing")
 
             if outro_audio is None:
-                raise ValueError("No outro_audio_normalized found in state. Step 14C must run before 14D.")
+                raise ValueError("assemble_final_audio: outro_audio_normalized missing")
 
-            append_file_log(log_buffer, "Assembling final audio (intro + sermon + outro)")
+            append_file_log(log_buffer, "Calling final_audio_assembler to build final audio")
 
-            # ---------------------------------------------------------
-            # TODO: Replace this placeholder with your actual audio
-            #       concatenation logic.
-            #
-            # Example:
-            #   final_audio = audio_utils.concat([intro_audio, sermon_audio, outro_audio])
-            #
-            # For now, we simulate concatenation by storing a tuple.
-            # ---------------------------------------------------------
-            audio_parts = []
+            # Call the external module to assemble the final audio
+            final_audio = assemble_final_audio(
+                intro_audio=intro_audio,
+                sermon_audio=sermon_audio,
+                outro_audio=outro_audio,
+                log_buffer=log_buffer
+            )
 
-            if intro_audio is not None:
-                audio_parts.append(intro_audio)
-
-            audio_parts.append(sermon_audio)
-            audio_parts.append(outro_audio)
-
-            # Placeholder for actual concatenation
-            final_audio = audio_parts
-
+            # Store for Step 14 (save_output_files)
             state["final_audio"] = final_audio
 
             append_file_log(log_buffer, "assemble_final_audio completed")
@@ -577,4 +568,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
