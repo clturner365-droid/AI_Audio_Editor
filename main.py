@@ -43,6 +43,7 @@ from modules.save_outputs import save_output_files
 # - modules/metadata_writer.py -> prepare_and_write_metadata(state, config, log_buffer)
 from modules.singing_removal import remove_singing
 from modules.sermon_extraction import remove_non_sermon_part
+from modules.tts_outro_generator import generate_dynamic_outro
 from modules.metadata_writer import prepare_and_write_metadata
 
 # Pipeline step names (must match the function names used below)
@@ -362,7 +363,147 @@ def process_file(input_path, output_dir, registry_path, config, only_list=None, 
     else:
         append_file_log(log_buffer, f"Skipped {step}")
 
-    # 14) save_output_files
+    # 14A) generate_outro_text (NEW)
+    step = "generate_outro_text"
+    if should_run(step, only_list, skip_list):
+      try:
+          # Generate the dynamic outro text based on metadata + duration rules
+          from modules.tts_outro_generator import generate_dynamic_outro
+
+          # Metadata should already be in state from step 13
+          metadata = state.get("metadata", {})
+
+          outro_text = generate_dynamic_outro(metadata)
+          state["outro_text"] = outro_text  # store for TTS step later
+
+          append_file_log(log_buffer, f"Generated outro_text: {outro_text}")
+          state.setdefault("actions", []).append({"step": step, "time": time.time()})
+
+      except Exception as e:
+          append_file_log(log_buffer, f"Error in {step}: {e}")
+          state.setdefault("errors", []).append({"step": step, "error": str(e)})
+      else:
+          append_file_log(log_buffer, f"Skipped {step}")
+
+      # 14B) generate_outro_audio (NEW)
+      step = "generate_outro_audio"
+      if should_run(step, only_list, skip_list):
+          try:
+              outro_text = state.get("outro_text")
+
+           if not outro_text:
+              raise ValueError("No outro_text found in state. Step 14A must run before 14B.")
+
+              append_file_log(log_buffer, f"Generating TTS audio for outro_text: {outro_text}")
+
+              # ---------------------------------------------------------
+              # TODO: Replace this placeholder with your actual TTS engine
+              #
+              # Example:
+              #   outro_audio = tts_engine.synthesize(outro_text)
+              #
+              # For now, we store a placeholder so the pipeline continues.
+              # ---------------------------------------------------------
+              outro_audio = None  # placeholder until TTS engine is selected
+
+              state["outro_audio"] = outro_audio
+
+              append_file_log(log_buffer, "generate_outro_audio completed")
+              state.setdefault("actions", []).append({"step": step, "time": time.time()})
+
+          except Exception as e:
+              append_file_log(log_buffer, f"Error in {step}: {e}")
+              state.setdefault("errors", []).append({"step": step, "error": str(e)})
+      else:
+          append_file_log(log_buffer, f"Skipped {step}")
+
+    # 14C) normalize_outro_audio (NEW)
+    step = "normalize_outro_audio"
+    if should_run(step, only_list, skip_list):
+        try:
+            outro_audio = state.get("outro_audio")
+            sermon_audio = state.get("sermon_audio")
+
+            if outro_audio is None:
+                raise ValueError("No outro_audio found in state. Step 14B must run before 14C.")
+
+            if sermon_audio is None:
+                raise ValueError("No sermon_audio found in state. Sermon must be processed before 14C.")
+
+            append_file_log(log_buffer, "Normalizing outro audio loudness to match sermon audio")
+
+            # ---------------------------------------------------------
+            # TODO: Replace this placeholder with your actual loudness
+            #       normalization call.
+            #
+            # Example:
+            #   normalized_outro = loudness_normalization.match_level(
+            #       outro_audio, sermon_audio
+            #   )
+            #
+            # For now, we store a placeholder so the pipeline continues.
+            # ---------------------------------------------------------
+            normalized_outro = outro_audio  # placeholder until loudness module is wired in
+
+            state["outro_audio_normalized"] = normalized_outro
+
+            append_file_log(log_buffer, "normalize_outro_audio completed")
+            state.setdefault("actions", []).append({"step": step, "time": time.time()})
+
+        except Exception as e:
+            append_file_log(log_buffer, f"Error in {step}: {e}")
+            state.setdefault("errors", []).append({"step": step, "error": str(e)})
+    else:
+        append_file_log(log_buffer, f"Skipped {step}")
+
+    # 14D) assemble_final_audio (NEW)
+    step = "assemble_final_audio"
+    if should_run(step, only_list, skip_list):
+       try:
+            sermon_audio = state.get("sermon_audio")
+            outro_audio = state.get("outro_audio_normalized")
+            intro_audio = state.get("intro_audio")  # optional, may be None
+
+           if sermon_audio is None:
+                raise ValueError("No sermon_audio found in state. Sermon must be processed before 14D.")
+
+            if outro_audio is None:
+                raise ValueError("No outro_audio_normalized found in state. Step 14C must run before 14D.")
+
+            append_file_log(log_buffer, "Assembling final audio (intro + sermon + outro)")
+
+            # ---------------------------------------------------------
+            # TODO: Replace this placeholder with your actual audio
+            #       concatenation logic.
+            #
+            # Example:
+            #   final_audio = audio_utils.concat([intro_audio, sermon_audio, outro_audio])
+            #
+            # For now, we simulate concatenation by storing a tuple.
+            # ---------------------------------------------------------
+            audio_parts = []
+
+            if intro_audio is not None:
+                audio_parts.append(intro_audio)
+
+            audio_parts.append(sermon_audio)
+            audio_parts.append(outro_audio)
+
+            # Placeholder for actual concatenation
+            final_audio = audio_parts
+
+            state["final_audio"] = final_audio
+
+            append_file_log(log_buffer, "assemble_final_audio completed")
+            state.setdefault("actions", []).append({"step": step, "time": time.time()})
+
+        except Exception as e:
+            append_file_log(log_buffer, f"Error in {step}: {e}")
+            state.setdefault("errors", []).append({"step": step, "error": str(e)})
+    else:
+        append_file_log(log_buffer, f"Skipped {step}")
+
+ # 14) save_output_files
     step = "save_output_files"
     saved = {}
     if should_run(step, only_list, skip_list):
@@ -436,3 +577,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
