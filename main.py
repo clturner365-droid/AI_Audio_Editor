@@ -385,42 +385,34 @@ def process_file(input_path, output_dir, registry_path, config, only_list=None, 
       else:
           append_file_log(log_buffer, f"Skipped {step}")
 
-      # 14B) generate_outro_audio (NEW)
-      step = "generate_outro_audio"
-      if should_run(step, only_list, skip_list):
-          try:
-              outro_text = state.get("outro_text")
+    # 14B) generate_outro_audio (NEW - Coqui TTS)
+    step = "generate_outro_audio"
+    if should_run(step, only_list, skip_list):
+        try:
+            from modules.tts_audio_generator import generate_tts_audio
 
-           if not outro_text:
-              raise ValueError("No outro_text found in state. Step 14A must run before 14B.")
+            outro_text = state.get("outro_text")
+            if not outro_text:
+                raise ValueError("No outro_text found in state. Step 14A must run first.")
 
-              append_file_log(log_buffer, f"Generating TTS audio for outro_text: {outro_text}")
+            outro_audio = generate_tts_audio(outro_text, config=config, log_buffer=log_buffer)
+            state["outro_audio"] = outro_audio
 
-              # ---------------------------------------------------------
-              # TODO: Replace this placeholder with your actual TTS engine
-              #
-              # Example:
-              #   outro_audio = tts_engine.synthesize(outro_text)
-              #
-              # For now, we store a placeholder so the pipeline continues.
-              # ---------------------------------------------------------
-              outro_audio = None  # placeholder until TTS engine is selected
+            append_file_log(log_buffer, "generate_outro_audio completed")
+            state.setdefault("actions", []).append({"step": step, "time": time.time()})
 
-              state["outro_audio"] = outro_audio
+        except Exception as e:
+            append_file_log(log_buffer, f"Error in {step}: {e}")
+            state.setdefault("errors", []).append({"step": step, "error": str(e)})
+    else:
+        append_file_log(log_buffer, f"Skipped {step}")
 
-              append_file_log(log_buffer, "generate_outro_audio completed")
-              state.setdefault("actions", []).append({"step": step, "time": time.time()})
-
-          except Exception as e:
-              append_file_log(log_buffer, f"Error in {step}: {e}")
-              state.setdefault("errors", []).append({"step": step, "error": str(e)})
-      else:
-          append_file_log(log_buffer, f"Skipped {step}")
-
-    # 14C) normalize_outro_audio (NEW)
+     # 14C) normalize_outro_audio (NEW - calls external module)
     step = "normalize_outro_audio"
     if should_run(step, only_list, skip_list):
         try:
+            from modules.loudness_normalizer import normalize_loudness
+
             outro_audio = state.get("outro_audio")
             sermon_audio = state.get("sermon_audio")
 
@@ -432,18 +424,12 @@ def process_file(input_path, output_dir, registry_path, config, only_list=None, 
 
             append_file_log(log_buffer, "Normalizing outro audio loudness to match sermon audio")
 
-            # ---------------------------------------------------------
-            # TODO: Replace this placeholder with your actual loudness
-            #       normalization call.
-            #
-            # Example:
-            #   normalized_outro = loudness_normalization.match_level(
-            #       outro_audio, sermon_audio
-            #   )
-            #
-            # For now, we store a placeholder so the pipeline continues.
-            # ---------------------------------------------------------
-            normalized_outro = outro_audio  # placeholder until loudness module is wired in
+            # Call external loudness normalization module
+            normalized_outro = normalize_loudness(
+                target_audio=outro_audio,
+                reference_audio=sermon_audio,
+                log_buffer=log_buffer
+            )
 
             state["outro_audio_normalized"] = normalized_outro
 
@@ -568,5 +554,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
