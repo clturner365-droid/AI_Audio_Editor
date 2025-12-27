@@ -73,6 +73,29 @@ def _embed_tags_if_allowed(final_path: str, metadata: Dict[str, Any], config: Di
         log_buffer.append(f"embed_tags_error: {e}")
 
 
+def merge_metadata(original_md, corrected_md):
+    """
+    Merge original embedded metadata with corrected metadata.
+
+    Rules:
+    - Start with original metadata (BSI tags, RIFF INFO, etc.)
+    - Override only fields present in corrected metadata
+    - Never delete or null out original fields
+    - Return a clean, final metadata dictionary
+    """
+    if original_md is None:
+        original_md = {}
+    if corrected_md is None:
+        corrected_md = {}
+
+    final = dict(original_md)
+
+    for key, value in corrected_md.items():
+        if value not in (None, "", []):
+            final[key] = value
+
+    return final
+
 def prepare_and_write_metadata(state: Dict[str, Any], config: Dict[str, Any], log_buffer: list) -> Dict[str, Any]:
     """
     Build metadata object and write sidecar JSON atomically. Optionally embed tags.
@@ -118,3 +141,4 @@ def prepare_and_write_metadata(state: Dict[str, Any], config: Dict[str, Any], lo
             _embed_tags_if_allowed(path, metadata, config, log_buffer)
 
     return state
+
