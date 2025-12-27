@@ -458,33 +458,54 @@ def process_file(input_path, output_dir, registry_path, config, only_list=None, 
     else:
         append_file_log(log_buffer, f"Skipped {step}")
 
-# 16) prepare_and_write_metadata (NEW)
-    step = "prepare_and_write_metadata"
-    if should_run(step, only_list, skip_list):
-        # prepare metadata and write sidecar JSON; embedding tags only if auto_accept_mode and decision finalize
-        state["input_path"] = input_path
-        state["working_path"] = str(working_copy_path)
-        state["final_paths"] = state.get("final_paths", {})
-        state = prepare_and_write_metadata(state, config, log_buffer)
-        append_file_log(log_buffer, "prepare_and_write_metadata completed")
-        state.setdefault("actions", []).append({"step": step, "time": time.time()})
-    else:
-        append_file_log(log_buffer, f"Skipped {step}")
+    # 16) prepare_and_write_metadata (NEW)
+        step = "prepare_and_write_metadata"
+        if should_run(step, only_list, skip_list):
+            # prepare metadata and write sidecar JSON; embedding tags only if auto_accept_mode and decision finalize
+           state["input_path"] = input_path
+           state["working_path"] = str(working_copy_path)
+           state["final_paths"] = state.get("final_paths", {})
+           state = prepare_and_write_metadata(state, config, log_buffer)
+           append_file_log(log_buffer, "prepare_and_write_metadata completed")
+           state.setdefault("actions", []).append({"step": step, "time": time.time()})
+        else:
+           append_file_log(log_buffer, f"Skipped {step}")
 
- # 17) save_output_files
+    # 17) save_output_files
     step = "save_output_files"
     saved = {}
     if should_run(step, only_list, skip_list):
-        saved = save_output_files(output_dir, base_name, state["waveform"], state["sr"], state["transcript"], {
-            "input_path": input_path,
-            "best_match": best_match,
-            "confidence": confidence,
-            "update_action": update_action,
-            "updated_name": updated_name,
-            "processing_time_s": round(time.time() - start_time, 2)
-        }, log_buffer)
+        saved = save_output_files(
+            output_dir,
+            base_name,
+            state["waveform"],
+            state["sr"],
+            state["transcript"],
+            {
+                "input_path": input_path,
+                "best_match": best_match,
+                "confidence": confidence,
+                "update_action": update_action,
+                "updated_name": updated_name,
+                "processing_time_s": round(time.time() - start_time, 2)
+            },
+            log_buffer
+        )
+
         append_file_log(log_buffer, f"Saved outputs: {saved}")
-        state.setdefault("actions", []).append({"step": step, "time": time.time(), "saved": saved})
+
+        # NEW: capture final WAV path
+        final_wav_path = saved.get("wav")
+        state["final_wav_path"] = final_wav_path
+
+        # NEW: write metadata into the final WAV
+        prepare_and_write_metadata(state, config, log_buffer, final_wav_path)
+
+        state.setdefault("actions", []).append({
+            "step": step,
+            "time": time.time(),
+            "saved": saved
+        })
         maybe_save(step)
     else:
         append_file_log(log_buffer, f"Skipped {step}")
@@ -545,6 +566,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
