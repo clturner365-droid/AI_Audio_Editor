@@ -39,10 +39,10 @@ from modules.singing_removal import remove_singing
 from modules.sermon_extraction import remove_non_sermon_part
 from modules.metadata_writer import prepare_and_write_metadata
 # Outro pipeline modules (14A–14D)
-from modules.tts_outro_generator import generate_dynamic_outro       # Step 14A
-from modules.tts_audio_generator import generate_tts_audio           # Step 14B
-from modules.loudness_normalizer import normalize_loudness as normalize_outro_loudness  # Step 14C wrapper
-from modules.final_audio_assembler import assemble_final_audio       # Step 14D
+from modules.tts_outro_generator import generate_dynamic_outro       
+from modules.tts_audio_generator import generate_tts_audio           
+from modules.loudness_normalizer import normalize_loudness as normalize_outro_loudness  
+from modules.final_audio_assembler import assemble_final_audio       
 
 # Pipeline step names (must match the function names used below)
 ALL_STEPS = [
@@ -57,11 +57,11 @@ ALL_STEPS = [
     "extract_fingerprint",
     "compare_fingerprints",
     "update_fingerprint_if_safe",
-    "prepare_and_write_metadata",
-    "generate_outro_text",        # NEW 14A
-    "generate_outro_audio",       # NEW 14B
-    "normalize_outro_audio",      # NEW 14C
-    "assemble_final_audio",       # NEW 14D
+    "generate_outro_text",        
+    "generate_outro_audio",       
+    "normalize_outro_audio",      
+    "assemble_final_audio",       
+    "prepare_and_write_metadata",   
     "save_output_files",
 ]
 
@@ -203,6 +203,7 @@ def process_file(input_path, output_dir, registry_path, config, only_list=None, 
         if not os.path.exists(working_copy_path):
             # read and write to ensure consistent sample rate if needed
             wf, sr = load_audio(input_path, log_buffer)
+            state["original_metadata"] = original_md
             sf.write(working_copy_path, wf, sr, subtype="PCM_16")
             append_file_log(log_buffer, f"Created working copy at {working_copy_path}")
     except Exception as e:
@@ -341,20 +342,7 @@ def process_file(input_path, output_dir, registry_path, config, only_list=None, 
     else:
         append_file_log(log_buffer, f"Skipped {step}")
 
-    # 12) prepare_and_write_metadata (NEW)
-    step = "prepare_and_write_metadata"
-    if should_run(step, only_list, skip_list):
-        # prepare metadata and write sidecar JSON; embedding tags only if auto_accept_mode and decision finalize
-        state["input_path"] = input_path
-        state["working_path"] = str(working_copy_path)
-        state["final_paths"] = state.get("final_paths", {})
-        state = prepare_and_write_metadata(state, config, log_buffer)
-        append_file_log(log_buffer, "prepare_and_write_metadata completed")
-        state.setdefault("actions", []).append({"step": step, "time": time.time()})
-    else:
-        append_file_log(log_buffer, f"Skipped {step}")
-
-    # 13) generate_outro_text (NEW)
+    # 12) generate_outro_text (NEW)
     step = "generate_outro_text"
     if should_run(step, only_list, skip_list):
       try:
@@ -376,7 +364,7 @@ def process_file(input_path, output_dir, registry_path, config, only_list=None, 
       else:
           append_file_log(log_buffer, f"Skipped {step}")
 
-    # 14) generate_outro_audio (NEW - Coqui TTS)
+    # 13) generate_outro_audio (NEW - Coqui TTS)
     step = "generate_outro_audio"
     if should_run(step, only_list, skip_list):
         try:
@@ -398,7 +386,7 @@ def process_file(input_path, output_dir, registry_path, config, only_list=None, 
     else:
         append_file_log(log_buffer, f"Skipped {step}")
 
-    # 15) normalize_outro_audio (NEW - calls loudness_normalizer)
+    # 14) normalize_outro_audio (NEW - calls loudness_normalizer)
     step = "normalize_outro_audio"
     if should_run(step, only_list, skip_list):
         try:
@@ -432,7 +420,7 @@ def process_file(input_path, output_dir, registry_path, config, only_list=None, 
     else:
         append_file_log(log_buffer, f"Skipped {step}")
 
-    # 16) assemble_final_audio (NEW - calls external module)
+    # 15) assemble_final_audio (NEW - calls external module)
     step = "assemble_final_audio"
     if should_run(step, only_list, skip_list):
         try:
@@ -467,6 +455,19 @@ def process_file(input_path, output_dir, registry_path, config, only_list=None, 
         except Exception as e:
             append_file_log(log_buffer, f"Error in {step}: {e}")
             state.setdefault("errors", []).append({"step": step, "error": str(e)})
+    else:
+        append_file_log(log_buffer, f"Skipped {step}")
+
+# 16) prepare_and_write_metadata (NEW)
+    step = "prepare_and_write_metadata"
+    if should_run(step, only_list, skip_list):
+        # prepare metadata and write sidecar JSON; embedding tags only if auto_accept_mode and decision finalize
+        state["input_path"] = input_path
+        state["working_path"] = str(working_copy_path)
+        state["final_paths"] = state.get("final_paths", {})
+        state = prepare_and_write_metadata(state, config, log_buffer)
+        append_file_log(log_buffer, "prepare_and_write_metadata completed")
+        state.setdefault("actions", []).append({"step": step, "time": time.time()})
     else:
         append_file_log(log_buffer, f"Skipped {step}")
 
@@ -544,6 +545,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
