@@ -510,6 +510,34 @@ def process_file(input_path, output_dir, registry_path, config, only_list=None, 
     else:
         append_file_log(log_buffer, f"Skipped {step}")
 
+    # ---------------------------------------------------------
+    # 18) cleanup_speaker_queue
+    # This step checks the speaker_resolution_queue.txt file.
+    # If the last line contains a RESOLVED entry, it will:
+    #   - find all UNKNOWN entries for that numeric speaker
+    #   - update embedded WAV metadata for those files
+    #   - update their sidecar JSON files
+    #   - remove all processed lines from the queue
+    #   - leave only unresolved entries in the queue
+    # If the last line is not RESOLVED, nothing happens.
+    # ---------------------------------------------------------
+    step = "cleanup_speaker_queue"
+    if should_run(step, only_list, skip_list):
+        try:
+            from modules.cleanup_speaker_queue import run_cleanup
+            run_cleanup(log_buffer)
+            append_file_log(log_buffer, f"Completed {step}")
+        except Exception as e:
+            append_file_log(log_buffer, f"{step}_error: {e}")
+
+        state.setdefault("actions", []).append({
+            "step": step,
+            "time": time.time()
+        })
+        maybe_save(step)
+    else:
+        append_file_log(log_buffer, f"Skipped {step}")
+
     # Save registry back to disk if not in test mode
     if not save_stepwise:
         _save_registry(registry_path, registry, log_buffer)
@@ -517,7 +545,7 @@ def process_file(input_path, output_dir, registry_path, config, only_list=None, 
         append_file_log(log_buffer, "Save-stepwise active: registry save skipped.")
 
     append_file_log(log_buffer, "Processing complete.")
-
+                 
     # Write pipeline log
     try:
         Path(output_dir).mkdir(parents=True, exist_ok=True)
@@ -566,6 +594,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
