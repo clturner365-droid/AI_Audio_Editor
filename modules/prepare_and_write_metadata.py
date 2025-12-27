@@ -8,7 +8,7 @@ the sidecar; embedding is conditional on `embed_tags` and file format support.
 
 Usage:
   from prepare_and_write_metadata import prepare_and_write_metadata, embed_tags_into_file
-  state = prepare_and_write_metadata(state, config, log_buffer)
+  state = prepare_and_write_metadata(state, config, log_buffer, final_wav_path)
 """
 
 import json
@@ -157,4 +157,5 @@ state["metadata"] = final_md
                 log_buffer.append(f"embed_tags_exception: {e}")
 
     return state
+
 
