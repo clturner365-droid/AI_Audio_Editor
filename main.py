@@ -301,13 +301,12 @@ def process_file(input_path, output_dir, registry_path, config, only_list=None, 
         append_file_log(log_buffer, f"Skipped {step}")
 
     # 9) extract_fingerprint (v2)
-    # Use the new pyannote-based extractor and store in state["fp"].
     step = "extract_fingerprint"
     if should_run(step, only_list, skip_list):
         from modules.fingerprint_engine_v2 import extract_fingerprint_v2
 
         state["fp"] = extract_fingerprint_v2(state["waveform"], state["sr"], log_buffer)
-        append_file_log(log_buffer, f"Fingerprint extracted (v2): {None if state['fp'] is None else 'ok'}")
+        append_file_log(log_buffer, f"v2: Step 9 summary: fp={'none' if state['fp'] is None else 'vector'}")
 
         state.setdefault("actions", []).append({
             "step": step,
@@ -317,17 +316,16 @@ def process_file(input_path, output_dir, registry_path, config, only_list=None, 
     else:
         append_file_log(log_buffer, f"Skipped {step}")
 
-    # 10) determine_speaker_identity (v2, replaces compare_fingerprints semantics)
+
+    # 10) determine_speaker_identity (v2)
     step = "compare_fingerprints"
     decided_name = None
     best_match = None
     confidence = 0.0
+
     if should_run(step, only_list, skip_list):
         from modules.speaker_identity_v2 import determine_identity_and_match
 
-        # You must ensure these exist in state earlier in the pipeline:
-        #   state["original_metadata"]["IART"]  -> original_meta_name
-        #   state["input_path"]                 -> WAV file path
         original_meta_name = None
         try:
             original_meta_name = state.get("original_metadata", {}).get("IART")
@@ -347,11 +345,10 @@ def process_file(input_path, output_dir, registry_path, config, only_list=None, 
 
         append_file_log(
             log_buffer,
-            f"v2: Identity decision result: decided_name={decided_name}, "
-            f"best_match={best_match}, confidence={confidence:.3f}"
+            f"v2: Step 10 summary: decided={decided_name}, "
+            f"best_match={best_match}, conf={confidence:.3f}"
         )
 
-        # store for later steps if useful
         state["decided_speaker"] = decided_name
         state["fp_confidence"] = confidence
 
@@ -368,9 +365,11 @@ def process_file(input_path, output_dir, registry_path, config, only_list=None, 
     else:
         append_file_log(log_buffer, f"Skipped {step}")
 
+
     # 11) update_fingerprint_if_safe (v2)
     step = "update_fingerprint_if_safe"
     update_action = None
+
     if should_run(step, only_list, skip_list):
         from modules.speaker_identity_v2 import update_fingerprint_for_decided_speaker
 
@@ -382,9 +381,7 @@ def process_file(input_path, output_dir, registry_path, config, only_list=None, 
             update_action = "test_mode_skip"
         else:
             decided_name = state.get("decided_speaker")
-            # If you have multi-speaker detection elsewhere, pass it here;
-            # for now we assume single-speaker = False.
-            multi = False
+            multi = False  # or your multi-speaker detection flag
 
             registry, update_action = update_fingerprint_for_decided_speaker(
                 registry=registry,
@@ -393,9 +390,14 @@ def process_file(input_path, output_dir, registry_path, config, only_list=None, 
                 confidence=state.get("fp_confidence", 0.0),
                 multi=multi,
                 log_buffer=log_buffer,
-            )
+             )
 
-        append_file_log(log_buffer, f"v2: Fingerprint update action: {update_action}, name={state.get('decided_speaker')}")
+        append_file_log(
+            log_buffer,
+            f"v2: Step 11 summary: update_action={update_action}, "
+            f"speaker={state.get('decided_speaker')}"
+        )
+
         state.setdefault("actions", []).append({
             "step": step,
             "time": time.time(),
@@ -657,6 +659,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
