@@ -300,44 +300,107 @@ def process_file(input_path, output_dir, registry_path, config, only_list=None, 
     else:
         append_file_log(log_buffer, f"Skipped {step}")
 
-    # 9) extract_fingerprint
+    # 9) extract_fingerprint (v2)
+    # Use the new pyannote-based extractor and store in state["fp"].
     step = "extract_fingerprint"
     if should_run(step, only_list, skip_list):
-        state["fp"] = extract_fingerprint(state["waveform"], state["sr"], log_buffer)
-        append_file_log(log_buffer, f"Fingerprint extracted: {None if state['fp'] is None else 'ok'}")
-        state.setdefault("actions", []).append({"step": step, "time": time.time()})
+        from modules.fingerprint_engine_v2 import extract_fingerprint_v2
+
+        state["fp"] = extract_fingerprint_v2(state["waveform"], state["sr"], log_buffer)
+        append_file_log(log_buffer, f"Fingerprint extracted (v2): {None if state['fp'] is None else 'ok'}")
+
+        state.setdefault("actions", []).append({
+            "step": step,
+            "time": time.time()
+        })
         maybe_save(step)
     else:
         append_file_log(log_buffer, f"Skipped {step}")
 
-    # 10) compare_fingerprints
+    # 10) determine_speaker_identity (v2, replaces compare_fingerprints semantics)
     step = "compare_fingerprints"
+    decided_name = None
     best_match = None
     confidence = 0.0
     if should_run(step, only_list, skip_list):
-        best_match, confidence = compare_fingerprints(registry, canonical_names, state["fp"], log_buffer)
-        append_file_log(log_buffer, f"Fingerprint comparison result: best_match={best_match}, confidence={confidence:.3f}")
-        state.setdefault("actions", []).append({"step": step, "time": time.time(), "result": {"best_match": best_match, "confidence": confidence}})
+        from modules.speaker_identity_v2 import determine_identity_and_match
+
+        # You must ensure these exist in state earlier in the pipeline:
+        #   state["original_metadata"]["IART"]  -> original_meta_name
+        #   state["input_path"]                 -> WAV file path
+        original_meta_name = None
+        try:
+            original_meta_name = state.get("original_metadata", {}).get("IART")
+        except Exception:
+            original_meta_name = None
+
+        input_path = state.get("input_path", "")
+
+        decided_name, best_match, confidence = determine_identity_and_match(
+            registry=registry,
+            canonical_names=canonical_names,
+            fp_new=state["fp"],
+            original_meta_name=original_meta_name,
+            input_path=input_path,
+            log_buffer=log_buffer,
+        )
+
+        append_file_log(
+            log_buffer,
+            f"v2: Identity decision result: decided_name={decided_name}, "
+            f"best_match={best_match}, confidence={confidence:.3f}"
+        )
+
+        # store for later steps if useful
+        state["decided_speaker"] = decided_name
+        state["fp_confidence"] = confidence
+
+        state.setdefault("actions", []).append({
+            "step": step,
+            "time": time.time(),
+            "result": {
+                "decided_name": decided_name,
+                "best_match": best_match,
+                "confidence": confidence
+            }
+        })
         maybe_save(step)
     else:
         append_file_log(log_buffer, f"Skipped {step}")
 
-    # 11) update_fingerprint_if_safe
+    # 11) update_fingerprint_if_safe (v2)
     step = "update_fingerprint_if_safe"
     update_action = None
-    updated_name = None
     if should_run(step, only_list, skip_list):
+        from modules.speaker_identity_v2 import update_fingerprint_for_decided_speaker
+
         if save_stepwise:
-            append_file_log(log_buffer, "Save-stepwise test mode: skipping registry update to avoid changing fingerprints.")
-            update_action = "test_mode_skip"
-            updated_name = None
-        else:
-            updated_registry, updated_name, update_action = update_fingerprint_if_safe(
-                registry, canonical_names, state["fp"], confidence, False, log_buffer
+            append_file_log(
+                log_buffer,
+                "Save-stepwise test mode: skipping registry update to avoid changing fingerprints (v2)."
             )
-            registry = updated_registry
-        append_file_log(log_buffer, f"Fingerprint update action: {update_action}, updated_name={updated_name}")
-        state.setdefault("actions", []).append({"step": step, "time": time.time(), "result": update_action})
+            update_action = "test_mode_skip"
+        else:
+            decided_name = state.get("decided_speaker")
+            # If you have multi-speaker detection elsewhere, pass it here;
+            # for now we assume single-speaker = False.
+            multi = False
+
+            registry, update_action = update_fingerprint_for_decided_speaker(
+                registry=registry,
+                decided_name=decided_name,
+                fp_new=state["fp"],
+                confidence=state.get("fp_confidence", 0.0),
+                multi=multi,
+                log_buffer=log_buffer,
+            )
+
+        append_file_log(log_buffer, f"v2: Fingerprint update action: {update_action}, name={state.get('decided_speaker')}")
+        state.setdefault("actions", []).append({
+            "step": step,
+            "time": time.time(),
+            "result": update_action
+        })
         maybe_save(step)
     else:
         append_file_log(log_buffer, f"Skipped {step}")
@@ -594,6 +657,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
