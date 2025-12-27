@@ -27,24 +27,22 @@ from modules.audio_loader import load_audio
 from modules.intro_outro_removal import remove_intros_outros
 from modules.noise_reduction import reduce_noise
 from modules.silence_trim import trim_silence
-from modules.loudness_normalization import normalize_loudness
+from modules.loudness_normalization import normalize_loudness   # used earlier in pipeline
 from modules.transcript import generate_transcript
 from modules.fingerprint_utils import (
     extract_fingerprint,
     compare_fingerprints,
     update_fingerprint_if_safe
 )
-from modules.intro_outro_apply import apply_intro_outro
 from modules.save_outputs import save_output_files
-
-# New modules (must be implemented)
-# - modules/singing_removal.py -> remove_singing(state, log_buffer, device, test_mode)
-# - modules/sermon_extraction.py -> remove_non_sermon_part(state, log_buffer, enrollment_registry, device, test_mode)
-# - modules/metadata_writer.py -> prepare_and_write_metadata(state, config, log_buffer)
 from modules.singing_removal import remove_singing
 from modules.sermon_extraction import remove_non_sermon_part
-from modules.tts_outro_generator import generate_dynamic_outro
 from modules.metadata_writer import prepare_and_write_metadata
+# Outro pipeline modules (14A–14D)
+from modules.tts_outro_generator import generate_dynamic_outro       # Step 14A
+from modules.tts_audio_generator import generate_tts_audio           # Step 14B
+from modules.loudness_normalizer import normalize_loudness as normalize_outro_loudness  # Step 14C wrapper
+from modules.final_audio_assembler import assemble_final_audio       # Step 14D
 
 # Pipeline step names (must match the function names used below)
 ALL_STEPS = [
@@ -54,13 +52,16 @@ ALL_STEPS = [
     "trim_silence",
     "normalize_loudness",
     "generate_transcript",
-    "remove_singing",            # NEW
-    "remove_non_sermon_part",    # NEW
+    "remove_singing",
+    "remove_non_sermon_part",
     "extract_fingerprint",
     "compare_fingerprints",
     "update_fingerprint_if_safe",
-    "apply_intro_outro",
-    "prepare_and_write_metadata",# NEW: sidecar + optional embed
+    "prepare_and_write_metadata",
+    "generate_outro_text",        # NEW 14A
+    "generate_outro_audio",       # NEW 14B
+    "normalize_outro_audio",      # NEW 14C
+    "assemble_final_audio",       # NEW 14D
     "save_output_files",
 ]
 
@@ -340,17 +341,7 @@ def process_file(input_path, output_dir, registry_path, config, only_list=None, 
     else:
         append_file_log(log_buffer, f"Skipped {step}")
 
-    # 12) apply_intro_outro
-    step = "apply_intro_outro"
-    if should_run(step, only_list, skip_list):
-        state["waveform"] = apply_intro_outro(state["waveform"], state["sr"], registry, log_buffer)
-        append_file_log(log_buffer, f"Final waveform length after applying templates: {len(state['waveform'])} samples")
-        state.setdefault("actions", []).append({"step": step, "time": time.time()})
-        maybe_save(step)
-    else:
-        append_file_log(log_buffer, f"Skipped {step}")
-
-    # 13) prepare_and_write_metadata (NEW)
+    # 12) prepare_and_write_metadata (NEW)
     step = "prepare_and_write_metadata"
     if should_run(step, only_list, skip_list):
         # prepare metadata and write sidecar JSON; embedding tags only if auto_accept_mode and decision finalize
@@ -363,7 +354,7 @@ def process_file(input_path, output_dir, registry_path, config, only_list=None, 
     else:
         append_file_log(log_buffer, f"Skipped {step}")
 
-    # 14A) generate_outro_text (NEW)
+    # 13) generate_outro_text (NEW)
     step = "generate_outro_text"
     if should_run(step, only_list, skip_list):
       try:
@@ -385,7 +376,7 @@ def process_file(input_path, output_dir, registry_path, config, only_list=None, 
       else:
           append_file_log(log_buffer, f"Skipped {step}")
 
-    # 14B) generate_outro_audio (NEW - Coqui TTS)
+    # 14) generate_outro_audio (NEW - Coqui TTS)
     step = "generate_outro_audio"
     if should_run(step, only_list, skip_list):
         try:
@@ -407,7 +398,7 @@ def process_file(input_path, output_dir, registry_path, config, only_list=None, 
     else:
         append_file_log(log_buffer, f"Skipped {step}")
 
-    # 14C) normalize_outro_audio (NEW - calls loudness_normalizer)
+    # 15) normalize_outro_audio (NEW - calls loudness_normalizer)
     step = "normalize_outro_audio"
     if should_run(step, only_list, skip_list):
         try:
@@ -441,7 +432,7 @@ def process_file(input_path, output_dir, registry_path, config, only_list=None, 
     else:
         append_file_log(log_buffer, f"Skipped {step}")
 
-    # 14D) assemble_final_audio (NEW - calls external module)
+    # 16) assemble_final_audio (NEW - calls external module)
     step = "assemble_final_audio"
     if should_run(step, only_list, skip_list):
         try:
@@ -479,7 +470,7 @@ def process_file(input_path, output_dir, registry_path, config, only_list=None, 
     else:
         append_file_log(log_buffer, f"Skipped {step}")
 
- # 14) save_output_files
+ # 17) save_output_files
     step = "save_output_files"
     saved = {}
     if should_run(step, only_list, skip_list):
@@ -553,6 +544,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
