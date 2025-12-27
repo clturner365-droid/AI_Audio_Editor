@@ -24,6 +24,29 @@ except Exception:
     FLAC = None
     MP3 = None
 
+def merge_metadata(original_md, corrected_md):
+    """
+    Merge original embedded metadata with corrected metadata.
+
+    Rules:
+    - Start with original metadata (BSI tags, RIFF INFO, etc.)
+    - Override only fields present in corrected metadata
+    - Never delete or null out original fields
+    - Return a clean, final metadata dictionary
+    """
+    if original_md is None:
+        original_md = {}
+    if corrected_md is None:
+        corrected_md = {}
+
+    final = dict(original_md)
+
+    for key, value in corrected_md.items():
+        if value not in (None, "", []):
+            final[key] = value
+
+    return final
+
 # Atomic write helper
 def _atomic_write_json(path: str, data: Dict[str, Any]) -> None:
     dirpath = os.path.dirname(path) or "."
@@ -85,7 +108,8 @@ def prepare_and_write_metadata(state: Dict[str, Any], config: Dict[str, Any], lo
         "input_path": state.get("input_path"),
         "working_path": state.get("working_path"),
         "final_paths": state.get("final_paths", {}),
-        "original_metadata": state.get("original_metadata", {}),
+        # We will merge original + corrected later, so don't embed original here
+        # (we remove this field from the corrected metadata block)
         "speaker_corrections": state.get("speaker_corrections", []),
         "sermon_selection": state.get("sermon_selection", {}),
         "intro_outro": state.get("intro_outro", {}),
@@ -100,9 +124,21 @@ def prepare_and_write_metadata(state: Dict[str, Any], config: Dict[str, Any], lo
         "audit": state.get("audit", [])
     }
 
-    # Always write sidecar atomically
+# --- MERGE ORIGINAL + CORRECTED METADATA ---
+original_md = state.get("original_metadata", {})
+corrected_md = metadata
+
+final_md = merge_metadata(original_md, corrected_md)
+
+# Replace metadata with merged version
+metadata = final_md
+
+# Store merged metadata in state for downstream use
+state["metadata"] = final_md
+
+# Always write sidecar atomically
     try:
-        _atomic_write_json(sidecar_path, metadata)
+        _atomic_write_json(sidecar_path, final_md)
         log_buffer.append(f"sidecar_written: {sidecar_path}")
         state.setdefault("sidecar_path", sidecar_path)
     except Exception as e:
@@ -116,8 +152,9 @@ def prepare_and_write_metadata(state: Dict[str, Any], config: Dict[str, Any], lo
         # embed into each final artifact if format supported
         for name, path in final_paths.items():
             try:
-                embed_tags_into_file(path, metadata, log_buffer)
+                embed_tags_into_file(path, final_md, log_buffer)
             except Exception as e:
                 log_buffer.append(f"embed_tags_exception: {e}")
 
     return state
+
