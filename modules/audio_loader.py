@@ -9,7 +9,12 @@ from mutagen.flac import FLAC
 from mutagen.mp3 import MP3
 
 from modules.logging_system import append_file_log
+from modules.stepwise_saving import maybe_save_step_audio   # your existing helper
 
+
+# ----------------------------------------------------------------------
+# ORIGINAL FUNCTIONS (unchanged)
+# ----------------------------------------------------------------------
 
 def extract_embedded_metadata(path, log_buffer):
     """
@@ -54,12 +59,6 @@ def extract_embedded_metadata(path, log_buffer):
 def load_audio(path, log_buffer, target_sr=None, dtype=np.float32):
     """
     Load audio from disk and return (waveform, sample_rate, embedded_metadata).
-
-    - Uses soundfile for primary load (preserves original SR and channels).
-    - Converts to mono.
-    - Optional resampling (if target_sr is provided).
-    - Always returns numpy.float32.
-    - Extracts embedded metadata using mutagen.
     """
     append_file_log(log_buffer, f"Loading audio from: {path}")
 
@@ -100,3 +99,56 @@ def load_audio(path, log_buffer, target_sr=None, dtype=np.float32):
 
     return waveform, sr, embedded_md
 
+
+# ----------------------------------------------------------------------
+# NEW: STANDARDIZED DISPATCHER WRAPPER
+# ----------------------------------------------------------------------
+
+def run(state, ctx):
+    """
+    Standardized module entry point for the dispatcher.
+
+    Dispatcher will call:
+        audio_loader.run(state, ctx)
+
+    This wrapper:
+      - reads input_path from ctx
+      - calls your existing load_audio()
+      - updates state["waveform"], state["sr"], state["original_metadata"]
+      - logs actions
+      - triggers stepwise save (if enabled)
+    """
+
+    log_buffer = ctx["log_buffer"]
+    input_path = ctx["working_copy_path"]   # this matches your existing main
+    target_sr = ctx.get("target_sr")        # optional
+    save_stepwise = bool(ctx.get("save_stepwise", False))
+
+    append_file_log(log_buffer, "=== Step: load_audio ===")
+
+    # Call your original function
+    waveform, sr, embedded_md = load_audio(
+        path=input_path,
+        log_buffer=log_buffer,
+        target_sr=target_sr
+    )
+
+    # Update state
+    state["waveform"] = waveform
+    state["sr"] = sr
+    state["original_metadata"] = embedded_md
+
+    # Record action
+    state.setdefault("actions", []).append({
+        "step": "load_audio",
+        "time": time.time(),
+        "sr": sr,
+        "samples": len(waveform),
+        "metadata_keys": list(embedded_md.keys())
+    })
+
+    # Stepwise save (dispatcher will not do this anymore)
+    if save_stepwise:
+        maybe_save_step_audio("load_audio", state, ctx)
+
+    return state
