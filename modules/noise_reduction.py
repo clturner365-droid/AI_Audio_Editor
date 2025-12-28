@@ -5,7 +5,10 @@ import numpy as np
 import noisereduce as nr
 import webrtcvad
 import librosa
+import time
+
 from modules.logging_system import append_file_log
+from modules.stepwise_saving import maybe_save_step_audio
 
 
 # ---------------------------------------------------------
@@ -133,3 +136,48 @@ def reduce_noise(waveform, sr, log_buffer):
     append_file_log(log_buffer, "Noise reduction complete.")
 
     return cleaned.astype(np.float32)
+
+
+# ---------------------------------------------------------
+# DISPATCHER WRAPPER
+# ---------------------------------------------------------
+
+def run(state, ctx):
+    """
+    Dispatcher entry point for noise reduction.
+
+    This wrapper:
+      - pulls waveform and sr from state
+      - calls your existing reduce_noise()
+      - updates state["waveform"]
+      - logs the action
+      - triggers stepwise save if enabled
+    """
+
+    log_buffer = ctx["log_buffer"]
+    save_stepwise = bool(ctx.get("save_stepwise", False))
+
+    append_file_log(log_buffer, "=== Step: reduce_noise ===")
+
+    wav = state.get("waveform")
+    sr = state.get("sr")
+
+    if wav is None or sr is None:
+        append_file_log(log_buffer, "No waveform or sample rate in state; skipping noise reduction.")
+        return state
+
+    cleaned = reduce_noise(wav, sr, log_buffer)
+    state["waveform"] = cleaned
+
+    # Record action
+    state.setdefault("actions", []).append({
+        "step": "reduce_noise",
+        "time": time.time(),
+        "speech_ratio": float(np.mean(wav != 0))  # optional placeholder metric
+    })
+
+    # Stepwise save
+    if save_stepwise:
+        maybe_save_step_audio("reduce_noise", state, ctx)
+
+    return state
