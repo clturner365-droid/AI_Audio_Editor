@@ -1,11 +1,13 @@
-# modules/speaker_identity_v2.py
-# Speaker identity decision logic, numeric-ID handling, queue writing,
-# registry-wide matching, RESOLVED promotion, and enhanced logging.
+# modules/speaker_identity.py
+# Unified speaker identity + fingerprint update step.
 
 import os
 import numpy as np
+import time
+
 from modules.logging_system import append_file_log
 from modules.fingerprint_engine_v2 import cosine_similarity, confidence_from_similarity
+from modules.stepwise_saving import maybe_save_step_audio
 
 
 QUEUE_PATH = "speaker_resolution_queue.txt"
@@ -103,9 +105,7 @@ def determine_identity_and_match(
     original_meta_name = (original_meta_name or "").strip()
     expected_name = None
 
-    # ---------------------------------------------------------
     # Metadata handling
-    # ---------------------------------------------------------
     if original_meta_name and original_meta_name in canonical_names:
         expected_name = original_meta_name
         append_file_log(log_buffer, f"v2: Expected speaker from metadata: {expected_name}")
@@ -117,9 +117,7 @@ def determine_identity_and_match(
     best_match_name = None
     best_conf = 0.0
 
-    # ---------------------------------------------------------
     # 1) Direct expected-name check
-    # ---------------------------------------------------------
     if expected_name and expected_name in fp_store:
         try:
             stored_np = np.array(fp_store[expected_name], dtype=np.float32)
@@ -146,9 +144,7 @@ def determine_identity_and_match(
         append_file_log(log_buffer, f"v2: First time for known speaker {expected_name}; enrolling.")
         return expected_name, None, 0.0
 
-    # ---------------------------------------------------------
     # 2) RESOLVED logic: numeric ID → real name
-    # ---------------------------------------------------------
     if original_meta_name in canonical_names:
         real_name = original_meta_name
 
@@ -184,9 +180,7 @@ def determine_identity_and_match(
 
             return real_name, real_name, conf
 
-    # ---------------------------------------------------------
     # 3) Registry-wide matching
-    # ---------------------------------------------------------
     best_global_name = None
     best_global_conf = 0.0
 
@@ -237,9 +231,7 @@ def determine_identity_and_match(
         if is_numeric_id(best_global_name):
             return best_global_name, best_global_name, best_global_conf
 
-    # ---------------------------------------------------------
     # 4) Fallback: assign numeric ID
-    # ---------------------------------------------------------
     numeric_id = allocate_numeric_id(registry)
 
     append_file_log(
@@ -319,3 +311,71 @@ def update_fingerprint_for_decided_speaker(
         append_file_log(log_buffer, f"v2: fingerprint update failed for {decided_name}: {e}")
         return registry, "error"
 
+
+# ---------------------------------------------------------
+# Unified Dispatcher Wrapper — speaker_identity
+# ---------------------------------------------------------
+
+def run(state, ctx):
+    """
+    Unified dispatcher step:
+      1. Determine identity
+      2. Update fingerprint
+      3. Update registry
+      4. Log everything
+    """
+
+    log_buffer = ctx["log_buffer"]
+    save_stepwise = bool(ctx.get("save_stepwise", False))
+
+    append_file_log(log_buffer, "=== Step: speaker_identity ===")
+
+    registry = state.get("registry", {})
+    fp_new = state.get("fingerprint")
+    canonical_names = ctx.get("canonical_speakers", [])
+    original_meta_name = state.get("metadata_speaker", "")
+    input_path = state.get("input_path", "")
+    multi = bool(state.get("multi_speaker", False))
+
+    # 1) Determine identity
+    decided_name, resolved_name, confidence = determine_identity_and_match(
+        registry,
+        canonical_names,
+        fp_new,
+        original_meta_name,
+        input_path,
+        log_buffer
+    )
+
+    # 2) Update fingerprint
+    registry, update_result = update_fingerprint_for_decided_speaker(
+        registry,
+        decided_name,
+        fp_new,
+        confidence,
+        multi,
+        log_buffer
+    )
+
+    # 3) Update state
+    state["decided_speaker"] = decided_name
+    state["resolved_speaker"] = resolved_name
+    state["identity_confidence"] = confidence
+    state["update_result"] = update_result
+    state["registry"] = registry
+
+    # 4) Log action
+    state.setdefault("actions", []).append({
+        "step": "speaker_identity",
+        "time": time.time(),
+        "decided": decided_name,
+        "resolved": resolved_name,
+        "confidence": confidence,
+        "update_result": update_result
+    })
+
+    # 5) Stepwise save
+    if save_stepwise:
+        maybe_save_step_audio("speaker_identity", state, ctx)
+
+    return state
