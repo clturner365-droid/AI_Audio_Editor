@@ -4,11 +4,14 @@
 import numpy as np
 import pyloudnorm as pyln
 import librosa
+import time
+
 from modules.logging_system import append_file_log
+from modules.stepwise_saving import maybe_save_step_audio
 
 
 # ---------------------------------------------------------
-# MAIN FUNCTION
+# MAIN FUNCTION (unchanged)
 # ---------------------------------------------------------
 
 def normalize_loudness(waveform: np.ndarray, sr: int, target_lufs: float, log_buffer):
@@ -63,3 +66,50 @@ def normalize_loudness(waveform: np.ndarray, sr: int, target_lufs: float, log_bu
     except Exception as e:
         append_file_log(log_buffer, f"Loudness normalization failed: {e}")
         return waveform
+
+
+# ---------------------------------------------------------
+# DISPATCHER WRAPPER
+# ---------------------------------------------------------
+
+def run(state, ctx):
+    """
+    Dispatcher entry point for loudness normalization.
+
+    This wrapper:
+      - pulls waveform and sr from state
+      - reads target LUFS from ctx
+      - calls your existing normalize_loudness()
+      - updates state["waveform"]
+      - logs the action
+      - triggers stepwise save if enabled
+    """
+
+    log_buffer = ctx["log_buffer"]
+    save_stepwise = bool(ctx.get("save_stepwise", False))
+    target_lufs = ctx.get("TARGET_LUFS", -16.0)
+
+    append_file_log(log_buffer, "=== Step: normalize_loudness ===")
+
+    wav = state.get("waveform")
+    sr = state.get("sr")
+
+    if wav is None or sr is None:
+        append_file_log(log_buffer, "No waveform or sample rate in state; skipping loudness normalization.")
+        return state
+
+    normalized = normalize_loudness(wav, sr, target_lufs, log_buffer)
+    state["waveform"] = normalized
+
+    # Record action
+    state.setdefault("actions", []).append({
+        "step": "normalize_loudness",
+        "time": time.time(),
+        "target_lufs": target_lufs
+    })
+
+    # Stepwise save
+    if save_stepwise:
+        maybe_save_step_audio("normalize_loudness", state, ctx)
+
+    return state
