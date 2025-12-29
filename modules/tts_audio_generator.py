@@ -2,13 +2,14 @@
 """
 modules/tts_audio_generator.py
 
-Generates TTS audio using Coqui TTS with rotating male VCTK voices.
-Returns a pydub.AudioSegment and does NOT modify pipeline state.
+Generates TTS audio using Coqui TTS (VCTK VITS).
+- Exposes a list of recommended male voices (MALE_VOICES).
+- Caller chooses the speaker and passes it in.
+- Returns a pydub.AudioSegment and does NOT modify pipeline state.
 """
 
 import os
 import tempfile
-from pathlib import Path
 
 from TTS.api import TTS
 from pydub import AudioSegment
@@ -17,7 +18,7 @@ from modules.logging_system import append_file_log
 
 
 # ---------------------------------------------------------
-# Male VCTK voices (clean, natural, stable)
+# Recommended male VCTK voices (clean, natural, stable)
 # ---------------------------------------------------------
 
 MALE_VOICES = ["p225", "p233", "p236", "p245", "p248"]
@@ -33,7 +34,7 @@ _tts_model = None
 def _load_tts_model():
     """
     Load and cache the VCTK VITS model.
-    This model supports multiple speakers, including the male voices we rotate through.
+    This model supports multiple speakers, including the male voices we use.
     """
     global _tts_model
     if _tts_model is None:
@@ -45,25 +46,27 @@ def _load_tts_model():
 # Main TTS function
 # ---------------------------------------------------------
 
-def generate_tts_audio(text: str, *, file_index: int = 0, log_buffer=None) -> AudioSegment:
+def generate_tts_audio(text: str, *, speaker: str, log_buffer=None) -> AudioSegment:
     """
-    Generate spoken audio from text using rotating male VCTK voices.
-    - text: the text to speak
-    - file_index: determines which male voice to use (rotates automatically)
-    Returns a pydub.AudioSegment.
+    Generate spoken audio from text using a specific VCTK speaker.
+
+    Args:
+        text: Text to synthesize.
+        speaker: VCTK speaker ID (e.g., "p225", "p233", ...).
+        log_buffer: Pipeline log buffer.
+
+    Returns:
+        pydub.AudioSegment with the spoken audio.
     """
 
     if log_buffer is not None:
         append_file_log(log_buffer, f"TTS: generating audio for text: {text}")
+        append_file_log(log_buffer, f"TTS: using speaker '{speaker}'")
+
+    temp_path = None
 
     try:
         tts = _load_tts_model()
-
-        # Pick voice based on rotation
-        speaker = MALE_VOICES[file_index % len(MALE_VOICES)]
-
-        if log_buffer is not None:
-            append_file_log(log_buffer, f"TTS: using speaker '{speaker}'")
 
         # Create a temporary WAV file
         with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
@@ -81,11 +84,12 @@ def generate_tts_audio(text: str, *, file_index: int = 0, log_buffer=None) -> Au
         raise
 
     finally:
-        # Clean up temp file
-        try:
-            os.remove(temp_path)
-        except Exception:
-            pass
+        if temp_path is not None:
+            try:
+                os.remove(temp_path)
+            except Exception:
+                # Non-fatal; temp file will be cleaned by OS eventually
+                pass
 
     if log_buffer is not None:
         append_file_log(log_buffer, "TTS: audio generation complete")
