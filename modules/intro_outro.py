@@ -1,239 +1,145 @@
-# intro_outro.py
-# Handles intro/outro selection, generation, loudness matching,
-# multi-speaker logic, and final audio assembly.
+#!/usr/bin/env python3
+"""
+modules/intro_outro.py
+
+Generates intro + outro using Coqui TTS (same voice for both),
+normalizes loudness, and assembles final audio using pydub.
+"""
 
 import os
-import numpy as np
+from pydub import AudioSegment
 
 from modules.logging_system import append_file_log
-from modules.registry import (
-    get_next_intro_index,
-    get_next_outro_index,
-    update_intro_rotation,
-    update_outro_rotation
-)
-
-# Base folders
-INTRO_DIR = os.path.join("PipelineB", "Intros")
-OUTRO_DIR = os.path.join("PipelineB", "Outros")
-
-MULTI_INTRO_DIR = os.path.join(INTRO_DIR, "_multi")
-MULTI_OUTRO_DIR = os.path.join(OUTRO_DIR, "_multi")
+from modules.tts_audio_generator import generate_tts_audio
 
 
 # ---------------------------------------------------------
-# DIRECTORY SETUP
+# TEXT GENERATION
 # ---------------------------------------------------------
 
-def ensure_intro_outro_dirs():
+def build_intro_text(state):
     """
-    Ensures all required directories exist.
+    Build intro text based on metadata.
+    Customize as needed.
     """
-    os.makedirs(INTRO_DIR, exist_ok=True)
-    os.makedirs(OUTRO_DIR, exist_ok=True)
-    os.makedirs(MULTI_INTRO_DIR, exist_ok=True)
-    os.makedirs(MULTI_OUTRO_DIR, exist_ok=True)
+    speaker = state.get("speaker_name", "your pastor")
+    title = state.get("sermon_title", "today's message")
+    return f"You are listening to {speaker} with {title}."
 
 
-# ---------------------------------------------------------
-# LOADING INTRO/OUTRO FILES
-# ---------------------------------------------------------
-
-def load_audio_file(path):
+def build_outro_text(state):
     """
-    Placeholder for loading intro/outro WAV files.
+    Build outro text based on metadata.
+    Customize as needed.
     """
-    # TODO: Replace with real audio loading
-    return np.zeros(1, dtype=np.float32), 16000
-
-
-def load_intro(canonical_name, index, log_buffer):
-    """
-    Loads the selected intro for a speaker.
-    """
-    path = os.path.join(INTRO_DIR, canonical_name, f"intro_{index}.wav")
-
-    if not os.path.exists(path):
-        append_file_log(log_buffer, f"Missing intro file: {path}")
-        return None, None
-
-    return load_audio_file(path)
-
-
-def load_outro(canonical_name, index, log_buffer):
-    """
-    Loads the selected outro for a speaker.
-    """
-    path = os.path.join(OUTRO_DIR, canonical_name, f"outro_{index}.wav")
-
-    if not os.path.exists(path):
-        append_file_log(log_buffer, f"Missing outro file: {path}")
-        return None, None
-
-    return load_audio_file(path)
+    return "Thank you for listening. Please join us again next time."
 
 
 # ---------------------------------------------------------
-# GENERATING NEW INTROS/OUTROS
+# LOUDNESS MATCHING (placeholder)
 # ---------------------------------------------------------
 
-def generate_intro(canonical_name, index, log_buffer):
+def match_loudness(target: AudioSegment, reference: AudioSegment):
     """
-    Generates a new intro using a male voice model.
-    Placeholder for TTS.
-    """
-    append_file_log(log_buffer, f"Generating intro {index} for {canonical_name}...")
-
-    # TODO: Replace with real TTS
-    waveform = np.zeros(16000 * 3, dtype=np.float32)  # 3 seconds placeholder
-    sample_rate = 16000
-
-    out_dir = os.path.join(INTRO_DIR, canonical_name)
-    os.makedirs(out_dir, exist_ok=True)
-
-    out_path = os.path.join(out_dir, f"intro_{index}.wav")
-    # TODO: Save waveform to disk
-
-    return waveform, sample_rate
-
-
-def generate_outro(canonical_name, index, log_buffer):
-    """
-    Generates a new outro using a male voice model.
-    """
-    append_file_log(log_buffer, f"Generating outro {index} for {canonical_name}...")
-
-    # TODO: Replace with real TTS
-    waveform = np.zeros(16000 * 3, dtype=np.float32)
-    sample_rate = 16000
-
-    out_dir = os.path.join(OUTRO_DIR, canonical_name)
-    os.makedirs(out_dir, exist_ok=True)
-
-    out_path = os.path.join(out_dir, f"outro_{index}.wav")
-    # TODO: Save waveform to disk
-
-    return waveform, sample_rate
-
-
-# ---------------------------------------------------------
-# LOUDNESS MATCHING
-# ---------------------------------------------------------
-
-def match_loudness(intro_wave, sermon_wave, sample_rate):
-    """
-    Adjusts intro/outro loudness to match sermon loudness.
     Placeholder for LUFS matching.
+    For now, return target unchanged.
     """
-    # TODO: Implement LUFS matching
-    return intro_wave
-
-
-# ---------------------------------------------------------
-# MULTI-SPEAKER GENERIC INTRO/OUTRO
-# ---------------------------------------------------------
-
-def load_multi_intro(log_buffer):
-    """
-    Loads the generic multi-speaker intro.
-    """
-    path = os.path.join(MULTI_INTRO_DIR, "intro_generic.wav")
-
-    if not os.path.exists(path):
-        append_file_log(log_buffer, "Missing generic multi-speaker intro.")
-        return None, None
-
-    return load_audio_file(path)
-
-
-def load_multi_outro(log_buffer):
-    """
-    Loads the generic multi-speaker outro.
-    """
-    path = os.path.join(MULTI_OUTRO_DIR, "outro_generic.wav")
-
-    if not os.path.exists(path):
-        append_file_log(log_buffer, "Missing generic multi-speaker outro.")
-        return None, None
-
-    return load_audio_file(path)
+    return target
 
 
 # ---------------------------------------------------------
 # FINAL ASSEMBLY
 # ---------------------------------------------------------
 
-def add_silence(seconds, sample_rate):
+def add_silence(seconds: float, sample_rate: int):
     """
-    Returns a waveform of digital silence.
+    Returns pydub silence.
     """
-    return np.zeros(int(seconds * sample_rate), dtype=np.float32)
+    return AudioSegment.silent(duration=int(seconds * 1000), frame_rate=sample_rate)
 
 
-def assemble_final_audio(intro, sermon, outro, sample_rate):
+def assemble_final_audio(intro: AudioSegment,
+                         sermon: AudioSegment,
+                         outro: AudioSegment,
+                         sample_rate: int):
     """
-    Concatenates intro + sermon + outro + silence.
+    Concatenate intro + sermon + outro + 10 seconds silence.
     """
     silence = add_silence(10, sample_rate)
-    parts = [p for p in [intro, sermon, outro, silence] if p is not None]
-    return np.concatenate(parts)
+    return intro + sermon + outro + silence
 
 
 # ---------------------------------------------------------
 # MAIN PIPELINE FUNCTION
 # ---------------------------------------------------------
 
-def apply_intro_outro(registry, canonical_names, sermon_wave, sample_rate, multi, log_buffer):
+def apply_intro_outro(state, ctx):
     """
     Full intro/outro workflow:
-        - Multi-speaker → generic intro/outro
-        - Single speaker → rotated intro/outro
+
+        - Use TTS to generate intro/outro
+        - Use SAME voice for both (state["tts_voice"])
         - Loudness match
         - Add 10 seconds silence
-        - Return final waveform
+        - Return final AudioSegment
     """
 
-    if multi:
-        append_file_log(log_buffer, "MULTI-SPEAKER: Using generic intro/outro.")
+    log_buffer = ctx["log_buffer"]
+    append_file_log(log_buffer, "intro_outro: starting")
 
-        intro, _ = load_multi_intro(log_buffer)
-        outro, _ = load_multi_outro(log_buffer)
+    # Ensure voice is selected by dispatcher
+    voice = state.get("tts_voice")
+    if not voice:
+        append_file_log(log_buffer, "intro_outro: no tts_voice in state; skipping")
+        return state
 
-        if intro is not None:
-            intro = match_loudness(intro, sermon_wave, sample_rate)
+    # Load sermon audio (AudioSegment)
+    sermon_path = state.get("working_path")
+    if not sermon_path or not os.path.exists(sermon_path):
+        append_file_log(log_buffer, "intro_outro: missing sermon audio")
+        return state
 
-        if outro is not None:
-            outro = match_loudness(outro, sermon_wave, sample_rate)
+    sermon_audio = AudioSegment.from_wav(sermon_path)
+    sample_rate = sermon_audio.frame_rate
 
-        final = assemble_final_audio(intro, sermon_wave, outro, sample_rate)
-        return final
+    # Build texts
+    intro_text = build_intro_text(state)
+    outro_text = build_outro_text(state)
 
-    # SINGLE SPEAKER
-    canonical = canonical_names[0]
-    entry = registry.get(canonical)
-
-    # Determine next intro/outro in rotation
-    intro_index = get_next_intro_index(entry)
-    outro_index = get_next_outro_index(entry)
-
-    # Load or generate intro
-    intro, _ = load_intro(canonical, intro_index, log_buffer)
-    if intro is None:
-        intro, _ = generate_intro(canonical, intro_index, log_buffer)
-
-    # Load or generate outro
-    outro, _ = load_outro(canonical, outro_index, log_buffer)
-    if outro is None:
-        outro, _ = generate_outro(canonical, outro_index, log_buffer)
+    # Generate TTS audio
+    intro_audio = generate_tts_audio(intro_text, speaker=voice, log_buffer=log_buffer)
+    outro_audio = generate_tts_audio(outro_text, speaker=voice, log_buffer=log_buffer)
 
     # Loudness match
-    intro = match_loudness(intro, sermon_wave, sample_rate)
-    outro = match_loudness(outro, sermon_wave, sample_rate)
-
-    # Update rotation counters
-    update_intro_rotation(entry, intro_index)
-    update_outro_rotation(entry, outro_index)
+    intro_audio = match_loudness(intro_audio, sermon_audio)
+    outro_audio = match_loudness(outro_audio, sermon_audio)
 
     # Assemble final audio
-    final = assemble_final_audio(intro, sermon_wave, outro, sample_rate)
-    return final
+    final_audio = assemble_final_audio(intro_audio, sermon_audio, outro_audio, sample_rate)
+
+    # Write final audio to disk
+    out_path = sermon_path.replace(".wav", "_final.wav")
+    final_audio.export(out_path, format="wav")
+
+    append_file_log(log_buffer, f"intro_outro: wrote final audio to {out_path}")
+
+    # Update state
+    state["working_path"] = out_path
+    state.setdefault("final_paths", {})["intro_outro"] = out_path
+
+    state.setdefault("actions", []).append({
+        "step": "intro_outro",
+        "tts_voice": voice,
+        "intro_text": intro_text,
+        "outro_text": outro_text
+    })
+
+    return state
+
+
+# ---------------------------------------------------------
+# DISPATCHER ENTRY POINT
+# ---------------------------------------------------------
+
+def run(state, ctx):
+    return apply_intro_outro(state, ctx)
