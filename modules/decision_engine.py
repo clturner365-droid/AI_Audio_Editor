@@ -1,287 +1,178 @@
-# decision_engine.py
+#!/usr/bin/env python3
 """
-Decision engine for automated finalize/quarantine logic.
+modules/dispatcher.py
 
-Usage:
-  from decision_engine import evaluate_and_decide
-  state = {...}  # pipeline state after processing steps
-  config = load_config("/etc/sermon_pipeline/production_config.yaml")
-  updated_state = evaluate_and_decide(state, config)
+Central dispatcher for the sermon processing pipeline.
+
+Order of operations per WAV file:
+
+  1. ASR (Whisper)                           -> state["transcript"], confidences
+  2. Sermon extraction                       -> state["sermon_selection"], trimmed audio
+  3. Singing removal                         -> state["singing_removal"]
+  4. Artifact checks                         -> state["artifact_checks"]
+  5. Fingerprinting / identity               -> state["fingerprint"]
+  6. Title generation (if missing)           -> state["sermon_title"]
+  7. Intro/outro assembly + transcript shift -> state["working_path"], state["transcript"]
+  8. Decision engine                         -> state["decision"], metadata sidecar
+  9. Cleanup speaker queue                   -> fixes historical speaker names
+
+All modules are expected to expose:
+
+  def run(state, ctx) -> state
 """
 
-import json
 import os
-import time
-import math
-import tempfile
-import subprocess
+from typing import List, Dict, Any
 
-# -------------------------
-# Helpers
-# -------------------------
-def now_ts():
-    return time.time()
+from modules.logging_system import append_file_log
 
-def write_sidecar_atomic(path, data):
-    dirpath = os.path.dirname(path) or "."
-    with tempfile.NamedTemporaryFile("w", dir=dirpath, delete=False) as tf:
-        json.dump(data, tf, indent=2)
-        tmp = tf.name
-    os.replace(tmp, path)
+from modules import (
+    asr_whisper,
+    sermon_extractor,
+    singing_removal,
+    artifact_checks,
+    fingerprint_engine,
+    intro_outro,
+    cleanup_speaker_queue,
+    decision_engine,
+    title_generator,
+)
 
-def get_gpu_memory_info():
-    try:
-        out = subprocess.check_output([
-            "nvidia-smi", "--query-gpu=index,name,memory.total,memory.free", "--format=csv,noheader,nounits"
-        ], encoding="utf8")
-        lines = [l.strip() for l in out.splitlines() if l.strip()]
-        info = []
-        for line in lines:
-            idx, name, total, free = [p.strip() for p in line.split(",")]
-            info.append({"index": int(idx), "name": name, "memory_total_mb": int(total), "memory_free_mb": int(free)})
-        return info
-    except Exception:
-        return []
+# ---------------------------------------------------------
+# Global model caches
+# ---------------------------------------------------------
 
-def safe_div(a, b):
-    try:
-        return a / b if b else 0.0
-    except Exception:
-        return 0.0
+_TITLE_MODEL = None
 
-# -------------------------
-# Per-check metric functions
-# -------------------------
-def metric_asr_confidence(state):
+
+def _ensure_title_model(log_buffer):
     """
-    Expect state['transcript_confidences'] as list of per-segment mean confidences (0..1)
-    or state['asr_mean_confidence'] as a single float.
+    Lazily load the CPU-only title model once for the entire process.
     """
-    if "asr_mean_confidence" in state:
-        return float(state["asr_mean_confidence"])
-    confs = state.get("transcript_confidences") or []
-    if confs:
-        return float(sum(confs) / len(confs))
-    return 0.0
+    global _TITLE_MODEL
+    if _TITLE_MODEL is None:
+        append_file_log(log_buffer, "dispatcher: loading title generation model (CPU-only)...")
+        _TITLE_MODEL = title_generator.load_title_model(log_buffer=log_buffer)
+        append_file_log(log_buffer, "dispatcher: title generation model ready.")
+    return _TITLE_MODEL
 
-def metric_sermon_confidence(state):
-    """
-    Expect state['sermon_selection'] with keys 'score' (0..1) if available.
-    Otherwise compute a fallback from speaker dominance, keyword density, and speech/music ratio.
-    """
-    sel = state.get("sermon_selection") or {}
-    if "score" in sel:
-        return float(sel["score"])
-    # fallback heuristics
-    speaker_dom = float(state.get("speaker_dominance", 0.0))  # 0..1
-    keyword_density = float(state.get("keyword_density", 0.0))  # 0..1
-    speech_music = float(state.get("speech_music_ratio", 1.0))  # 0..1
-    # weighted fallback
-    return (0.5 * speaker_dom) + (0.3 * keyword_density) + (0.2 * speech_music)
 
-def metric_singing_quality(state):
-    """
-    Expect state['singing_removal'] with 'vocal_reduction' (0..1) and 'spoken_overlap' (0..1).
-    Higher vocal_reduction and lower spoken_overlap => better score.
-    """
-    s = state.get("singing_removal") or {}
-    vocal_reduction = float(s.get("vocal_reduction", 0.0))
-    spoken_overlap = float(s.get("spoken_overlap", 0.0))
-    # score = vocal_reduction * (1 - spoken_overlap)
-    return vocal_reduction * (1.0 - spoken_overlap)
+# ---------------------------------------------------------
+# Per-file pipeline execution
+# ---------------------------------------------------------
 
-def metric_artifact_score(state):
-    """
-    Return 0..1 where 1 means no artifacts. Expect state['artifact_checks'] with keys:
-    'clipping_ratio' (0..1), 'silence_spike' (0..1), 'rms_drop_db' (positive number).
-    """
-    a = state.get("artifact_checks") or {}
-    clipping = float(a.get("clipping_ratio", 0.0))
-    silence = float(a.get("silence_spike", 0.0))
-    rms_drop_db = float(a.get("rms_drop_db", 0.0))
-    # penalize clipping and silence; convert rms_drop_db to 0..1 penalty (cap at 30 dB)
-    rms_penalty = min(rms_drop_db / 30.0, 1.0)
-    penalty = max(clipping, silence, rms_penalty)
-    return max(0.0, 1.0 - penalty)
-
-def metric_fingerprint_penalty(state):
-    """
-    If fingerprint indicates duplicate or unsafe update, return penalty in 0..1.
-    Expect state['fingerprint'] with 'duplicate_score' (0..1) and 'allow_update' boolean.
-    """
-    f = state.get("fingerprint") or {}
-    dup = float(f.get("duplicate_score", 0.0))
-    allow = bool(f.get("allow_update", True))
-    if allow:
-        return 0.0
-    # penalty proportional to duplicate score
-    return dup
-
-# -------------------------
-# Composite score
-# -------------------------
-def compute_composite_score(state, config):
-    # weights from config
-    w_asr = config["weights"].get("asr_confidence", 0.30)
-    w_sermon = config["weights"].get("sermon_confidence", 0.30)
-    w_singing = config["weights"].get("singing_quality", 0.20)
-    w_artifact = config["weights"].get("artifact_score", 0.10)
-    w_fp = config["weights"].get("fingerprint_penalty", 0.10)
-
-    asr = metric_asr_confidence(state)
-    sermon = metric_sermon_confidence(state)
-    singing = metric_singing_quality(state)
-    artifact = metric_artifact_score(state)
-    fp_pen = metric_fingerprint_penalty(state)
-
-    # normalize and combine; fingerprint is a penalty so subtract
-    composite = (
-        (w_asr * asr) +
-        (w_sermon * sermon) +
-        (w_singing * singing) +
-        (w_artifact * artifact)
-    ) - (w_fp * fp_pen)
-
-    # clamp 0..1
-    composite = max(0.0, min(1.0, composite))
-    # attach metrics to state for audit
-    state.setdefault("scores", {})
-    state["scores"].update({
-        "asr_confidence": asr,
-        "sermon_confidence": sermon,
-        "singing_quality": singing,
-        "artifact_score": artifact,
-        "fingerprint_penalty": fp_pen,
-        "composite_score": composite
-    })
-    return composite
-
-# -------------------------
-# Decision logic
-# -------------------------
-def finalize_decision(state, config, log_buffer=None):
-    """
-    Apply thresholds and decide finalize vs quarantine vs accept-with-flags.
-    Updates state['decision'] and writes sidecar JSON.
-    """
-    if log_buffer is None:
-        log_buffer = []
-
-    # compute composite if not present
-    composite = state.get("scores", {}).get("composite_score")
-    if composite is None:
-        composite = compute_composite_score(state, config)
-
-    ts = now_ts()
-    decision = {
-        "time": ts,
-        "composite_score": composite,
-        "action": None,
-        "reasons": []
+def _init_state_for_file(input_path: str, out_dir: str) -> Dict[str, Any]:
+    base = os.path.splitext(os.path.basename(input_path))[0]
+    state: Dict[str, Any] = {
+        "input_path": input_path,
+        "working_path": input_path,   # modules will update this as they go
+        "base": base,
+        "out_dir": out_dir,
+        "actions": [],
+        "scores": {},
     }
-
-    # thresholds
-    auto_accept = config["thresholds"]["AUTO_ACCEPT_THRESHOLD"]
-    quarantine = config["thresholds"]["QUARANTINE_THRESHOLD"]
-
-    # per-check gating: if any hard fail conditions, immediate quarantine
-    asr = state["scores"]["asr_confidence"]
-    if asr < config["thresholds"]["ASR_CONFIDENCE_FAIL"]:
-        decision["action"] = "quarantine"
-        decision["reasons"].append("low_asr_confidence")
-    # singing spoken overlap hard fail
-    singing_info = state.get("singing_removal", {})
-    if singing_info.get("spoken_overlap", 0.0) > config["thresholds"]["SINGING_SPOKEN_OVERLAP_FAIL"]:
-        decision["action"] = "quarantine"
-        decision["reasons"].append("high_spoken_overlap_in_singing_removal")
-
-    # if not hard-failed, use composite thresholds
-    if decision["action"] is None:
-        if composite >= auto_accept:
-            decision["action"] = "finalize"
-            decision["reasons"].append("composite_above_auto_accept")
-        elif composite < quarantine:
-            decision["action"] = "quarantine"
-            decision["reasons"].append("composite_below_quarantine")
-        else:
-            decision["action"] = "finalize_with_flags"
-            decision["reasons"].append("composite_between_thresholds")
-
-    # attach decision to state
-    state["decision"] = decision
-
-    # write sidecar metadata
-    base = state.get("base") or os.path.splitext(os.path.basename(state.get("input_path", "unknown")))[0]
-    out_dir = state.get("out_dir") or os.path.dirname(state.get("working_path", ".")) or "."
-    sidecar_path = os.path.join(out_dir, f"{base}.metadata.json")
-
-    # build metadata object
-    metadata = {
-        "pipeline_version": config.get("pipeline_version", "unknown"),
-        "input_path": state.get("input_path"),
-        "working_path": state.get("working_path"),
-        "final_paths": state.get("final_paths", {}),
-        "scores": state.get("scores", {}),
-        "actions": state.get("actions", []),
-        "gpu_log": state.get("gpu_log", []),
-        "decision": state["decision"],
-        "qa": {"required": False, "notes": []},
-        "timestamp": ts
-    }
-
-    # if quarantined, mark qa.required true for visibility (but no human signoff required)
-    if decision["action"] == "quarantine":
-        metadata["qa"]["required"] = True
-        metadata["qa"]["notes"].append("auto_quarantine")
-
-    # atomic write
-    try:
-        write_sidecar_atomic(sidecar_path, metadata)
-        log_buffer.append(f"sidecar_written: {sidecar_path}")
-    except Exception as e:
-        log_buffer.append(f"sidecar_write_error: {e}")
-
-    # final behavior: move or tag files according to action
-    # NOTE: actual file moves should be handled by caller; we return metadata and decision
     return state
 
-# -------------------------
-# Public API
-# -------------------------
-def evaluate_and_decide(state, config, log_buffer=None):
+
+def _init_ctx_for_file(file_index: int, config: Dict[str, Any]) -> Dict[str, Any]:
+    ctx: Dict[str, Any] = {
+        "file_index": file_index,
+        "log_buffer": [],
+        "config": config,
+    }
+    return ctx
+
+
+def _generate_title_if_missing(state: Dict[str, Any], ctx: Dict[str, Any]):
     """
-    Top-level entry. Computes scores, logs GPU state, applies decision logic,
-    and returns updated state. Caller should persist sidecar and move files as needed.
+    Dispatcher-level title generation step.
+
+    If state["sermon_title"] is missing or empty, generate one from the transcript
+    using the CPU-only title model and store it back into state.
     """
-    if log_buffer is None:
-        log_buffer = []
+    log_buffer = ctx["log_buffer"]
+    title = state.get("sermon_title")
+    transcript = state.get("transcript")
 
-    # snapshot GPU state for audit
-    gpu_info = get_gpu_memory_info()
-    state.setdefault("gpu_log", []).append({"time": now_ts(), "gpus": gpu_info})
-    log_buffer.append(f"gpu_snapshot: {gpu_info}")
+    if title:
+        append_file_log(log_buffer, f"dispatcher: sermon_title already present: {title}")
+        return
 
-    # compute composite score
-    composite = compute_composite_score(state, config)
-    log_buffer.append(f"composite_score: {composite:.3f}")
+    if not transcript:
+        append_file_log(log_buffer, "dispatcher: no transcript available; cannot generate title.")
+        return
 
-    # finalize decision and write sidecar
-    state = finalize_decision(state, config, log_buffer=log_buffer)
+    model = _ensure_title_model(log_buffer)
+    generated = title_generator.generate_title_from_transcript(
+        transcript=transcript.get("full_text", transcript) if isinstance(transcript, dict) else transcript,
+        model=model,
+        log_buffer=log_buffer,
+    )
+    state["sermon_title"] = generated
+    append_file_log(log_buffer, f"dispatcher: generated sermon_title: {generated}")
+
+
+def run_pipeline_for_file(input_path: str, file_index: int, config: Dict[str, Any], out_dir: str) -> Dict[str, Any]:
+    """
+    Run the full pipeline for a single WAV file.
+    Returns the final state for that file.
+    """
+    state = _init_state_for_file(input_path, out_dir)
+    ctx = _init_ctx_for_file(file_index, config)
+    log_buffer = ctx["log_buffer"]
+
+    append_file_log(log_buffer, f"=== Pipeline start for file_index={file_index}, input={input_path} ===")
+
+    # 1. ASR (Whisper)
+    state = asr_whisper.run(state, ctx)
+
+    # 2. Sermon extraction
+    state = sermon_extractor.run(state, ctx)
+
+    # 3. Singing removal
+    state = singing_removal.run(state, ctx)
+
+    # 4. Artifact checks
+    state = artifact_checks.run(state, ctx)
+
+    # 5. Fingerprinting / identity
+    state = fingerprint_engine.run(state, ctx)
+
+    # 6. Title generation (if missing)
+    _generate_title_if_missing(state, ctx)
+
+    # 7. Intro/outro + transcript shift
+    state = intro_outro.run(state, ctx)
+
+    # 8. Decision engine (sidecar + decision)
+    state = decision_engine.run(state, ctx)
+
+    # 9. Cleanup speaker queue (out-of-band historical fixups)
+    state = cleanup_speaker_queue.run(state, ctx)
+
+    append_file_log(log_buffer, f"=== Pipeline end for file_index={file_index} ===")
+
+    # Attach logs to state so caller can persist them if desired
+    state["log_buffer"] = log_buffer
     return state
 
-# -------------------------
-# Config loader helper
-# -------------------------
-def load_config(path):
-    import yaml
-    with open(path, "r") as f:
-        cfg = yaml.safe_load(f)
-    # ensure weights exist
-    cfg.setdefault("weights", {
-        "asr_confidence": 0.30,
-        "sermon_confidence": 0.30,
-        "singing_quality": 0.20,
-        "artifact_score": 0.10,
-        "fingerprint_penalty": 0.10
-    })
-    return cfg
+
+# ---------------------------------------------------------
+# Batch entry point
+# ---------------------------------------------------------
+
+def run_pipeline(input_paths: List[str], config: Dict[str, Any], out_dir: str) -> List[Dict[str, Any]]:
+    """
+    Run the pipeline for a list of input WAV paths.
+    Returns a list of final state dicts, one per file.
+    """
+    results: List[Dict[str, Any]] = []
+
+    if not os.path.exists(out_dir):
+        os.makedirs(out_dir, exist_ok=True)
+
+    for idx, input_path in enumerate(input_paths):
+        state = run_pipeline_for_file(input_path=input_path, file_index=idx, config=config, out_dir=out_dir)
+        results.append(state)
+
+    return results
