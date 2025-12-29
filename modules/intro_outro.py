@@ -3,7 +3,8 @@
 modules/intro_outro.py
 
 Generates intro + outro using Coqui TTS (same voice for both),
-applies duration‑based rules, rotates templates, and assembles final audio.
+applies duration‑based rules, rotates templates, shifts transcript timestamps,
+and assembles final audio using pydub.
 """
 
 import os
@@ -95,6 +96,32 @@ def assemble_final_audio(intro, sermon, outro, sample_rate):
 
 
 # ---------------------------------------------------------
+# TRANSCRIPT TIMESTAMP SHIFTING
+# ---------------------------------------------------------
+
+def shift_transcript_timestamps(transcript, intro_duration_sec, log_buffer):
+    """
+    Shifts all transcript timestamps by the intro duration.
+    Does NOT modify transcript text.
+    """
+    if transcript is None:
+        append_file_log(log_buffer, "intro_outro: no transcript found; skipping timestamp shift.")
+        return None
+
+    if "segments" not in transcript:
+        append_file_log(log_buffer, "intro_outro: transcript missing segments; skipping timestamp shift.")
+        return transcript
+
+    append_file_log(log_buffer, f"intro_outro: shifting transcript timestamps by {intro_duration_sec:.2f} seconds.")
+
+    for seg in transcript["segments"]:
+        seg["start"] += intro_duration_sec
+        seg["end"] += intro_duration_sec
+
+    return transcript
+
+
+# ---------------------------------------------------------
 # MAIN PIPELINE FUNCTION
 # ---------------------------------------------------------
 
@@ -117,12 +144,25 @@ def apply_intro_outro(state, ctx):
     duration_minutes = len(sermon_audio) / 1000 / 60
     file_index = ctx.get("file_index", 0)
 
+    # Build intro/outro text
     intro_text = build_intro_text(state, duration_minutes, file_index)
     outro_text = build_outro_text(state, duration_minutes, file_index)
 
+    # Generate TTS audio
     intro_audio = generate_tts_audio(intro_text, speaker=voice, log_buffer=log_buffer)
-    outro_audio = generate_tts_audio(outro_text, speaker=voice, log_buffer=log_buffer) if outro_text else AudioSegment.silent(duration=0)
+    intro_duration_sec = len(intro_audio) / 1000.0
 
+    if outro_text:
+        outro_audio = generate_tts_audio(outro_text, speaker=voice, log_buffer=log_buffer)
+    else:
+        outro_audio = AudioSegment.silent(duration=0)
+
+    # Shift transcript timestamps
+    transcript = state.get("transcript")
+    shifted_transcript = shift_transcript_timestamps(transcript, intro_duration_sec, log_buffer)
+    state["transcript"] = shifted_transcript
+
+    # Assemble final audio
     final_audio = assemble_final_audio(intro_audio, sermon_audio, outro_audio, sample_rate)
 
     out_path = sermon_path.replace(".wav", "_final.wav")
