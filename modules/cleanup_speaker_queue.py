@@ -1,7 +1,9 @@
-# cleanup_speaker_queue.py
+#!/usr/bin/env python3
 """
-Cleanup module for resolving unknown speakers and correcting metadata
-in previously processed WAV files.
+modules/cleanup_speaker_queue.py
+
+Dispatcher‑ready cleanup module for resolving unknown speakers and
+correcting metadata in previously processed WAV files.
 
 This module:
 - Reads the speaker_resolution_queue.txt file
@@ -21,6 +23,10 @@ from modules.logging_system import append_file_log
 
 QUEUE_PATH = "speaker_resolution_queue.txt"
 
+
+# ---------------------------------------------------------
+# QUEUE HELPERS
+# ---------------------------------------------------------
 
 def _read_queue():
     if not os.path.exists(QUEUE_PATH):
@@ -59,6 +65,10 @@ def _parse_unknown(line):
         return None, None
 
 
+# ---------------------------------------------------------
+# METADATA REWRITERS
+# ---------------------------------------------------------
+
 def _rewrite_wav_metadata(wav_path, speaker_name, log_buffer):
     """
     Replace embedded metadata speaker name in a WAV file.
@@ -68,8 +78,7 @@ def _rewrite_wav_metadata(wav_path, speaker_name, log_buffer):
         if audio.tags is None:
             audio.add_tags()
 
-        # BSI uses IART for speaker/artist
-        audio["IART"] = speaker_name
+        audio["IART"] = speaker_name  # BSI uses IART for speaker/artist
         audio.save()
         append_file_log(log_buffer, f"cleanup: updated WAV metadata for {wav_path}")
 
@@ -90,7 +99,6 @@ def _rewrite_sidecar_json(wav_path, speaker_name, log_buffer):
         with open(json_path, "r", encoding="utf-8") as f:
             data = json.load(f)
 
-        # Update metadata
         if "metadata" in data:
             data["metadata"]["speaker"] = speaker_name
         else:
@@ -105,18 +113,14 @@ def _rewrite_sidecar_json(wav_path, speaker_name, log_buffer):
         append_file_log(log_buffer, f"cleanup_error: failed to update JSON for {wav_path}: {e}")
 
 
-def run_cleanup(log_buffer):
-    """
-    Main entry point.
-    Called at the end of processing a single WAV file.
+# ---------------------------------------------------------
+# CORE CLEANUP LOGIC
+# ---------------------------------------------------------
 
-    Steps:
-    - Read queue
-    - Check last line
-    - If not RESOLVED, exit
-    - If RESOLVED, fix all files for that numeric speaker
-    - Remove processed lines
-    - Rewrite queue
+def cleanup_queue(log_buffer):
+    """
+    Performs cleanup if the last queue entry is RESOLVED.
+    Called once per processed WAV file by the dispatcher.
     """
     lines = _read_queue()
     if not lines:
@@ -150,12 +154,26 @@ def run_cleanup(log_buffer):
         _rewrite_sidecar_json(wav_path, real_name, log_buffer)
 
     # Remove all lines for this numeric speaker
-    new_lines = []
-    for line in lines:
-        if numeric in line:
-            continue
-        new_lines.append(line)
+    new_lines = [line for line in lines if numeric not in line]
 
     _write_queue(new_lines)
 
     append_file_log(log_buffer, f"cleanup: completed resolution for {numeric}")
+
+
+# ---------------------------------------------------------
+# DISPATCHER ENTRY POINT
+# ---------------------------------------------------------
+
+def run(state, ctx):
+    """
+    Dispatcher‑compatible entry point.
+    Does NOT modify state.
+    """
+    log_buffer = ctx["log_buffer"]
+    append_file_log(log_buffer, "=== Step: cleanup_speaker_queue ===")
+
+    cleanup_queue(log_buffer)
+
+    # This step does not modify state
+    return state
