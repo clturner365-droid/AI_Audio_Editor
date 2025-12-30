@@ -7,6 +7,7 @@ Purpose:
         - canonical map (book_num → canonical_name)
         - guard rails for low-confidence variants
         - scripture-context detection
+        - explicit prevention of partial-word matches
 
 This module:
     - NEVER modifies the Whisper transcript
@@ -28,6 +29,12 @@ def load_variant_map_from_lines(lines: Iterable[str]) -> Dict[str, Tuple[int, st
     """
     Load variant map from lines of:
         variant|book_number|confidence
+
+    Confidence:
+        H = high confidence (always replace)
+        L = low confidence (requires scripture context)
+        X = disabled (never replace)
+
     Returns:
         { "genesis": (1, "H"), "name": (34, "L"), ... }
     """
@@ -67,6 +74,7 @@ def load_canonical_map_from_lines(lines: Iterable[str]) -> Dict[int, str]:
     """
     Load canonical map from lines of:
         canonical_name|book_number
+
     Returns:
         { 1: "genesis", 2: "exodus", ... }
     """
@@ -107,10 +115,13 @@ class ScriptureBookNormalizer:
             for k, v in self.canonical_map.items()
         }
 
-        # Build regex (longest first)
+        # Build regex (longest variants first)
         escaped = [re.escape(v) for v in self.variant_map]
         escaped.sort(key=len, reverse=True)
-        pattern = r"\b(" + "|".join(escaped) + r")\b"
+
+        # Explicitly forbid partial-word matches
+        pattern = r"(?<![A-Za-z])(" + "|".join(escaped) + r")(?![A-Za-z])"
+
         self.variant_regex = re.compile(pattern, flags=re.IGNORECASE)
 
         # Precompile context patterns
