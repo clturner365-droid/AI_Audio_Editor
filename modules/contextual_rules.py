@@ -1,10 +1,27 @@
-import re
+"""
+modules/contextual_rules.py
 
+Purpose:
+    Apply contextual cleanup rules to transcript text BEFORE
+    scripture book normalization and chapter/verse normalization.
+
+Dispatcher-ready:
+    - No module calls another module
+    - Uses structured logging
+    - Step-ID aware
+    - Debug toggle
+"""
+
+import re
+from dataclasses import dataclass
+from typing import Optional
+
+
+@dataclass
 class ContextualRules:
-    """
-    Applies contextual clues to refine book-name normalization.
-    This does NOT perform linking — only book-name cleanup.
-    """
+    logger: Optional[object] = None
+    step_id: str = "scripture.contextual_rules"
+    debug: bool = False
 
     # Spoken ordinals → numeric
     ORDINAL_MAP = {
@@ -24,7 +41,21 @@ class ContextualRules:
         "five": "5",
     }
 
+    # ------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------
+
     def apply(self, text: str) -> str:
+        """Apply all contextual cleanup rules to text."""
+        if self.debug and self.logger:
+            self.logger.debug({
+                "step": self.step_id,
+                "event": "start_contextual_rules",
+                "input_preview": text[:120]
+            })
+
+        original = text
+
         text = self._normalize_spoken_ordinals(text)
         text = self._normalize_spoken_cardinals(text)
         text = self._fix_number_before_book(text)
@@ -32,6 +63,21 @@ class ContextualRules:
         text = self._fix_chapter_patterns(text)
         text = self._fix_verse_patterns(text)
         text = self._fix_misordered_patterns(text)
+
+        if self.logger:
+            self.logger.info({
+                "step": self.step_id,
+                "event": "contextual_rules_applied",
+                "changed": (text != original)
+            })
+
+        if self.debug and self.logger:
+            self.logger.debug({
+                "step": self.step_id,
+                "event": "end_contextual_rules",
+                "output_preview": text[:120]
+            })
+
         return text
 
     # ------------------------------------------------------------
@@ -118,3 +164,41 @@ class ContextualRules:
             text,
             flags=re.IGNORECASE,
         )
+
+
+# ----------------------------------------------------------------------
+# Dispatcher wrapper
+# ----------------------------------------------------------------------
+
+def run(state, ctx):
+    """
+    Dispatcher entry point for contextual scripture cleanup.
+    """
+
+    logger = ctx.get("logger")
+    debug = bool(ctx.get("debug", False))
+    step_id = ctx.get("step_id", "scripture.contextual_rules")
+
+    if logger:
+        logger.info({
+            "step": step_id,
+            "event": "contextual_rules_start"
+        })
+
+    rules = ContextualRules(
+        logger=logger,
+        step_id=step_id,
+        debug=debug
+    )
+
+    text = state.get("transcript", "")
+    cleaned = rules.apply(text)
+    state["transcript"] = cleaned
+
+    if logger:
+        logger.info({
+            "step": step_id,
+            "event": "contextual_rules_complete"
+        })
+
+    return state
