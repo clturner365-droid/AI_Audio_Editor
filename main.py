@@ -1,302 +1,315 @@
 #!/usr/bin/env python3
 """
-Main entry point for the sermon processing pipeline (rewritten version).
+main.py
 
-Responsibilities:
-- Parse command-line arguments
-- Initialize logging
-- Perform GPU sanity checks (startup)
-- Load configuration
-- Initialize models (once per run)
-- Load input list and progress
-- Loop over files:
-  - Process each file
-  - Update progress
-  - Run VRAM health monitor
-  - Check control file for graceful stop
-- Handle input list rollover
-- Write summary information
+Entry point for the sermon processing pipeline.
+
+Design:
+    - Flat dispatcher: main() calls each module's run(state, ctx).
+    - Per-WAV loop with shared ctx and per-file state.
+    - VRAM monitoring via modules.vram_monitor.
+    - No resume/progress.txt logic wired (by your choice).
+    - Logs per WAV and overall progress.
+
+Expected module interface:
+    def run(state: dict, ctx: dict) -> dict
 """
 
-import argparse
+import os
 import sys
-from pathlib import Path
-from datetime import datetime
+import argparse
+import logging
+from typing import List, Dict, Any
 
-# These modules will be implemented as part of the rewrite.
-from pipeline import (
-  config,
-  gpu_health,
-  logging as logmod,
-  progress,
-  control,
-  models,
-  process_file,
+# ---------------------------------------------------------
+# Module imports
+# ---------------------------------------------------------
+
+from modules import (
+    vram_monitor,
+    audio_loader,
+    demucs,
+    separation_worker,
+    singing_removal,
+    noise_reduction,
+    trim_silence,
+    loudness_normalization,
+    transcribe_worker,
+    transcript,
+    sermon_extraction,
+    intro_outro_removal,
+    contextual_rules,
+    speaker_identity,
+    metadata,
+    registry,
+    cleanup_speaker_queue,
+    title_generator,
+    tts_audio_generator,
+    intro_outro,
+    final_wav_writer,
+    scripture_book_normalizer,
+    chapter_verse_normalizer,
+    html_linker,
+    text_html_export,
 )
 
+# ---------------------------------------------------------
+# Logging setup
+# ---------------------------------------------------------
 
-def parse_args(argv=None):
-  """
-  Parse command-line arguments for the pipeline.
-  """
-  parser = argparse.ArgumentParser(
-    description="Sermon processing pipeline (rewritten)."
-  )
+def setup_logger(log_level: str = "INFO") -> logging.Logger:
+    logger = logging.getLogger("pipeline")
+    logger.setLevel(getattr(logging, log_level.upper(), logging.INFO))
 
-  parser.add_argument(
-    "--input-list",
-    required=True,
-    type=Path,
-    help="Path to text file containing list of input WAV files.",
-  )
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setLevel(getattr(logging, log_level.upper(), logging.INFO))
 
-  parser.add_argument(
-    "--output-dir",
-    required=True,
-    type=Path,
-    help="Directory where all outputs and logs will be written.",
-  )
+    formatter = logging.Formatter(
+        fmt="%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    handler.setFormatter(formatter)
 
-  parser.add_argument(
-    "--registry",
-    required=True,
-    type=Path,
-    help="Path to speaker registry file.",
-  )
+    if not logger.handlers:
+        logger.addHandler(handler)
 
-  parser.add_argument(
-    "--config",
-    type=Path,
-    default=None,
-    help="Optional YAML configuration file.",
-  )
-
-  parser.add_argument(
-    "--progress-file",
-    type=Path,
-    default=None,
-    help="Optional path to progress tracking file (defaults to Progress.txt in output dir).",
-  )
-
-  parser.add_argument(
-    "--control-file",
-    type=Path,
-    default=None,
-    help="Optional path to control file (defaults to control.txt in output dir).",
-  )
-
-  parser.add_argument(
-    "--summary-log",
-    type=Path,
-    default=None,
-    help="Optional path to global summary log (defaults to Summary.log in output dir).",
-  )
-
-  parser.add_argument(
-    "--only",
-    nargs="*",
-    default=None,
-    help="Optional list of step names to run exclusively.",
-  )
-
-  parser.add_argument(
-    "--skip",
-    nargs="*",
-    default=None,
-    help="Optional list of step names to skip.",
-  )
-
-  parser.add_argument(
-    "--save-stepwise",
-    action="store_true",
-    help="If set, save intermediate audio outputs for each major step.",
-  )
-
-  # GPU / device options
-  parser.add_argument(
-    "--gpu-whisper",
-    type=str,
-    default="cuda:0",
-    help="Device for Whisper model (e.g., cuda:0 or cpu).",
-  )
-
-  parser.add_argument(
-    "--gpu-vad",
-    type=str,
-    default="cuda:0",
-    help="Device for VAD/segmentation model.",
-  )
-
-  parser.add_argument(
-    "--gpu-embed",
-    type=str,
-    default="cuda:1",
-    help="Device for speaker embedding model.",
-  )
-
-  parser.add_argument(
-    "--gpu-demucs",
-    type=str,
-    default="cuda:1",
-    help="Device for Demucs model.",
-  )
-
-  args = parser.parse_args(argv)
-  return args
+    logger.propagate = False
+    return logger
 
 
-def resolve_paths(args):
-  """
-  Normalize and derive paths that depend on --output-dir defaults.
-  """
-  output_dir = args.output_dir
-  output_dir.mkdir(parents=True, exist_ok=True)
+# ---------------------------------------------------------
+# State / ctx helpers
+# ---------------------------------------------------------
 
-  progress_file = args.progress_file or (output_dir / "Progress.txt")
-  control_file = args.control_file or (output_dir / "control.txt")
-  summary_log = args.summary_log or (output_dir / "Summary.log")
-
-  return {
-    "output_dir": output_dir,
-    "progress_file": progress_file,
-    "control_file": control_file,
-    "summary_log": summary_log,
-  }
+def init_state_for_file(input_path: str, out_dir: str) -> Dict[str, Any]:
+    base = os.path.splitext(os.path.basename(input_path))[0]
+    return {
+        "input_path": input_path,
+        "base": base,
+        "out_dir": out_dir,
+        "actions": [],
+        "scores": {},
+    }
 
 
-def main(argv=None):
-  # 1) Parse arguments
-  args = parse_args(argv)
-  paths = resolve_paths(args)
+def init_ctx_for_file(
+    file_index: int,
+    logger: logging.Logger,
+    debug: bool,
+    save_stepwise: bool,
+) -> Dict[str, Any]:
+    return {
+        "file_index": file_index,
+        "logger": logger,
+        "debug": debug,
+        "save_stepwise": save_stepwise,
+        "use_gpu0": True,
+        "use_gpu1": True,
+        "stop_batch": False,
+    }
 
-  output_dir = paths["output_dir"]
-  progress_file = paths["progress_file"]
-  control_file = paths["control_file"]
-  summary_log = paths["summary_log"]
 
-  # 2) Initialize logging
-  logmod.init_logging(summary_log=summary_log)
+# ---------------------------------------------------------
+# Per-file pipeline
+# ---------------------------------------------------------
 
-  logmod.log_info(f"=== Pipeline run started at {datetime.now().isoformat()} ===")
-  logmod.log_info(f"Using input list: {args.input_list}")
-  logmod.log_info(f"Output directory: {output_dir}")
-  logmod.log_info(f"Progress file: {progress_file}")
-  logmod.log_info(f"Control file: {control_file}")
-  logmod.log_info(f"Summary log: {summary_log}")
+def run_pipeline_for_file(
+    wav_path: str,
+    file_index: int,
+    out_dir: str,
+    logger: logging.Logger,
+    debug: bool,
+    save_stepwise: bool,
+) -> Dict[str, Any]:
 
-  # 3) Reset control file to 'continue' at startup
-  control.write_initial_state(control_file)
+    state = init_state_for_file(wav_path, out_dir)
+    ctx = init_ctx_for_file(file_index, logger, debug, save_stepwise)
 
-  # 4) Load configuration
-  cfg = config.load_config(args.config)
+    logger.info({
+        "step": "main",
+        "event": "file_start",
+        "file_index": file_index,
+        "input_path": wav_path,
+    })
 
-  # 5) GPU startup checks + baseline capture
-  gpu_state = gpu_health.perform_startup_checks_and_capture_baseline(
-    cfg=cfg,
-    devices={
-      "whisper": args.gpu_whisper,
-      "vad": args.gpu_vad,
-      "embed": args.gpu_embed,
-      "demucs": args.gpu_demucs,
-    },
-    summary_logger=logmod,
-  )
+    # Ensure output directory exists
+    os.makedirs(out_dir, exist_ok=True)
 
-  # 6) Load all models once
-  model_bundle = models.load_all_models(
-    cfg=cfg,
-    devices={
-      "whisper": args.gpu_whisper,
-      "vad": args.gpu_vad,
-      "embed": args.gpu_embed,
-      "demucs": args.gpu_demucs,
-    },
-    summary_logger=logmod,
-  )
+    # 0. VRAM monitor (per-WAV control)
+    state = vram_monitor.run(state, ctx)
+    if ctx.get("stop_batch"):
+        logger.error({
+            "step": "main",
+            "event": "stop_batch_from_vram",
+            "file_index": file_index,
+        })
+        return state
 
-  # 7) Load input list
-  input_files = config.load_input_list(args.input_list)
-  if not input_files:
-    logmod.log_error("Input list is empty. Nothing to do.")
-    return 1
+    # STAGE 1 — Load & pre-clean audio
+    state = audio_loader.run(state, ctx)
+    state = demucs.run(state, ctx)
+    state = separation_worker.run(state, ctx)
+    state = singing_removal.run(state, ctx)
+    state = noise_reduction.run(state, ctx)
+    state = trim_silence.run(state, ctx)
+    state = loudness_normalization.run(state, ctx)
 
-  # 8) Load progress
-  start_index = progress.load_start_index(progress_file, len(input_files))
-  logmod.log_info(f"Starting at index {start_index} of {len(input_files)}.")
+    # STAGE 2 — First transcript pass
+    state = transcribe_worker.run(state, ctx)
+    state = transcript.run(state, ctx)
 
-  # 9) Main loop
-  for index in range(start_index, len(input_files)):
-    wav_path = Path(input_files[index])
+    # STAGE 3 — Transcript-driven audio steps
+    state = sermon_extraction.run(state, ctx)
+    state = intro_outro_removal.run(state, ctx)
+    state = contextual_rules.run(state, ctx)
 
-    # Per-file logger
-    per_file_logger = logmod.create_file_logger(output_dir=output_dir, wav_path=wav_path)
-    per_file_logger.log_file_header(index=index, total=len(input_files))
+    # STAGE 4 — Speaker identity, metadata, title
+    state = speaker_identity.run(state, ctx)
+    state = metadata.run(state, ctx)
+    state = registry.run(state, ctx)
+    state = cleanup_speaker_queue.run(state, ctx)
+    state = title_generator.run(state, ctx)
 
-    file_start_time = datetime.now()
+    # STAGE 5 — Intro/outro TTS + final audio assembly
+    state = tts_audio_generator.run(state, ctx)
+    state = intro_outro.run(state, ctx)
+    state = final_wav_writer.run(state, ctx)
 
-    try:
-      # a) Process the file
-      result = process_file.process_single_file(
-        wav_path=wav_path,
-        output_dir=output_dir,
-        cfg=cfg,
-        models=model_bundle,
-        gpu_state=gpu_state,
-        per_file_logger=per_file_logger,
-        global_logger=logmod,
-        only_steps=args.only,
-        skip_steps=args.skip,
-        save_stepwise=args.save_stepwise,
-      )
+    # STAGE 6 — Final transcript + scripture + HTML
+    state = transcribe_worker.run(state, ctx)   # optional second pass; module should handle reuse if desired
+    state = transcript.run(state, ctx)
+    state = scripture_book_normalizer.run(state, ctx)
+    state = chapter_verse_normalizer.run(state, ctx)
+    state = html_linker.run(state, ctx)
+    state = text_html_export.run(state, ctx)
 
-      # b) Update progress
-      progress.update_progress(progress_file, index)
+    logger.info({
+        "step": "main",
+        "event": "file_complete",
+        "file_index": file_index,
+        "input_path": wav_path,
+    })
 
-      # c) VRAM health monitor
-      gpu_health.check_vram_health_after_file(
-        gpu_state=gpu_state,
-        cfg=cfg,
-        per_file_logger=per_file_logger,
-        global_logger=logmod,
-      )
+    return state
 
-      # d) Compute elapsed time
-      file_end_time = datetime.now()
-      elapsed = (file_end_time - file_start_time).total_seconds()
 
-      # e) Summary line
-      logmod.write_summary_line(
-        timestamp=file_end_time,
-        wav_path=wav_path,
-        result=result,
-        gpu_state=gpu_state,
-        elapsed_seconds=elapsed,
-      )
+# ---------------------------------------------------------
+# Batch runner
+# ---------------------------------------------------------
 
-      # f) Control file check
-      if control.should_stop(control_file):
-        logmod.log_warning("Graceful stop requested via control file. Halting after current file.")
-        break
+def run_batch(
+    input_paths: List[str],
+    out_dir: str,
+    log_level: str = "INFO",
+    debug: bool = False,
+    save_stepwise: bool = False,
+) -> List[Dict[str, Any]]:
 
-    except Exception as exc:
-      per_file_logger.log_exception("Unhandled exception while processing file", exc)
-      logmod.log_error(f"Unhandled exception on file {wav_path}: {exc}")
-      return 1
+    logger = setup_logger(log_level)
+    logger.info({
+        "step": "main",
+        "event": "batch_start",
+        "num_files": len(input_paths),
+        "out_dir": out_dir,
+    })
 
-    finally:
-      per_file_logger.log_file_footer()
+    results: List[Dict[str, Any]] = []
+    os.makedirs(out_dir, exist_ok=True)
 
-  # 10) Input list rollover
-  if index == len(input_files) - 1:
-    config.handle_input_list_rollover(
-      input_list_path=args.input_list,
-      progress_file=progress_file,
-      global_logger=logmod,
+    for idx, wav_path in enumerate(input_paths):
+        if not os.path.exists(wav_path):
+            logger.error({
+                "step": "main",
+                "event": "missing_input",
+                "file_index": idx,
+                "input_path": wav_path,
+            })
+            continue
+
+        state = run_pipeline_for_file(
+            wav_path=wav_path,
+            file_index=idx,
+            out_dir=out_dir,
+            logger=logger,
+            debug=debug,
+            save_stepwise=save_stepwise,
+        )
+        results.append(state)
+
+        if state.get("system", {}).get("vram_state") and state.get("system", {}).get("vram_state", {}).get("gpu0_status") == "hard_limit":
+            logger.error("Stopping batch due to GPU0 hard VRAM limit.")
+            break
+
+        if state.get("system", {}).get("vram_state") and state.get("system", {}).get("vram_state", {}).get("gpu1_status") in ("degraded_expired",):
+            logger.error("Stopping batch due to degraded mode TTL expiration.")
+            break
+
+    logger.info({
+        "step": "main",
+        "event": "batch_complete",
+        "processed_files": len(results),
+    })
+
+    return results
+
+
+# ---------------------------------------------------------
+# CLI
+# ---------------------------------------------------------
+
+def parse_args(argv: List[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Sermon processing pipeline")
+    parser.add_argument(
+        "--input",
+        "-i",
+        nargs="+",
+        required=True,
+        help="Input WAV file(s)",
+    )
+    parser.add_argument(
+        "--out-dir",
+        "-o",
+        required=True,
+        help="Output directory",
+    )
+    parser.add_argument(
+        "--log-level",
+        "-l",
+        default="INFO",
+        help="Log level (DEBUG, INFO, WARNING, ERROR)",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug mode in modules",
+    )
+    parser.add_argument(
+        "--save-stepwise",
+        action="store_true",
+        help="Enable stepwise audio saving where supported",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: List[str]) -> int:
+    args = parse_args(argv)
+
+    input_paths = args.input
+    out_dir = args.out_dir
+    log_level = args.log_level
+    debug = bool(args.debug)
+    save_stepwise = bool(args.save_stepwise)
+
+    run_batch(
+        input_paths=input_paths,
+        out_dir=out_dir,
+        log_level=log_level,
+        debug=debug,
+        save_stepwise=save_stepwise,
     )
 
-  logmod.log_info(f"=== Pipeline run finished at {datetime.now().isoformat()} ===")
-  return 0
+    return 0
 
 
 if __name__ == "__main__":
-  sys.exit(main())
+    raise SystemExit(main(sys.argv[1:]))
