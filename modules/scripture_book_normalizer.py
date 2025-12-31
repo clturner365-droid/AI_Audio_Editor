@@ -1,24 +1,20 @@
 """
 scripture_book_normalizer.py
 
-Purpose:
-    Normalize Bible book names in transcript text using:
-        - variant map (variant → (book_num, confidence))
-        - canonical map (book_num → canonical_name)
-        - guard rails for low-confidence variants
-        - scripture-context detection
-        - explicit prevention of partial-word matches
+Pipeline-integrated version with debug toggle.
 
-This module:
-    - NEVER modifies the Whisper transcript
-    - ONLY normalizes book names for downstream linking
-    - Is fully production-ready
+Features:
+    - Variant normalization with H/L/X confidence
+    - Scripture-context detection for L variants
+    - Explicit prevention of partial-word matches
+    - Pipeline-integrated logging (step_id + shared logger)
+    - Debug toggle for deep tracing
 """
 
 from __future__ import annotations
 import re
 from dataclasses import dataclass
-from typing import Dict, Tuple, Iterable
+from typing import Dict, Tuple, Iterable, Optional
 
 
 # -------------------------------------------------------------------
@@ -26,18 +22,6 @@ from typing import Dict, Tuple, Iterable
 # -------------------------------------------------------------------
 
 def load_variant_map_from_lines(lines: Iterable[str]) -> Dict[str, Tuple[int, str]]:
-    """
-    Load variant map from lines of:
-        variant|book_number|confidence
-
-    Confidence:
-        H = high confidence (always replace)
-        L = low confidence (requires scripture context)
-        X = disabled (never replace)
-
-    Returns:
-        { "genesis": (1, "H"), "name": (34, "L"), ... }
-    """
     mapping: Dict[str, Tuple[int, str]] = {}
 
     for raw in lines:
@@ -47,7 +31,6 @@ def load_variant_map_from_lines(lines: Iterable[str]) -> Dict[str, Tuple[int, st
 
         parts = line.split("|")
         if len(parts) == 2:
-            # Backward compatibility: assume high confidence
             variant, num = parts
             conf = "H"
         elif len(parts) == 3:
@@ -59,25 +42,12 @@ def load_variant_map_from_lines(lines: Iterable[str]) -> Dict[str, Tuple[int, st
         if not variant:
             continue
 
-        book_num = int(num.strip())
-        conf = conf.strip().upper()
-
-        if conf not in ("H", "L", "X"):
-            conf = "H"  # safe fallback
-
-        mapping[variant] = (book_num, conf)
+        mapping[variant] = (int(num.strip()), conf.strip().upper())
 
     return mapping
 
 
 def load_canonical_map_from_lines(lines: Iterable[str]) -> Dict[int, str]:
-    """
-    Load canonical map from lines of:
-        canonical_name|book_number
-
-    Returns:
-        { 1: "genesis", 2: "exodus", ... }
-    """
     mapping: Dict[int, str] = {}
 
     for raw in lines:
@@ -86,11 +56,7 @@ def load_canonical_map_from_lines(lines: Iterable[str]) -> Dict[int, str]:
             continue
 
         name, num = line.split("|", 1)
-        name = name.strip().lower()
-        if not name:
-            continue
-
-        mapping[int(num.strip())] = name
+        mapping[int(num.strip())] = name.strip().lower()
 
     return mapping
 
@@ -101,8 +67,13 @@ def load_canonical_map_from_lines(lines: Iterable[str]) -> Dict[int, str]:
 
 @dataclass
 class ScriptureBookNormalizer:
-    variant_map: Dict[str, Tuple[int, str]]   # variant → (book_num, confidence)
-    canonical_map: Dict[int, str]             # book_num → canonical_name
+    variant_map: Dict[str, Tuple[int, str]]
+    canonical_map: Dict[int, str]
+
+    # Pipeline logging integration
+    logger: Optional[object] = None
+    step_id: str = "normalize.scripture"
+    debug: bool = False
 
     def __post_init__(self) -> None:
         # Normalize keys
@@ -115,13 +86,12 @@ class ScriptureBookNormalizer:
             for k, v in self.canonical_map.items()
         }
 
-        # Build regex (longest variants first)
+        # Build regex (longest first)
         escaped = [re.escape(v) for v in self.variant_map]
         escaped.sort(key=len, reverse=True)
 
         # Explicitly forbid partial-word matches
         pattern = r"(?<![A-Za-z])(" + "|".join(escaped) + r")(?![A-Za-z])"
-
         self.variant_regex = re.compile(pattern, flags=re.IGNORECASE)
 
         # Precompile context patterns
@@ -136,14 +106,7 @@ class ScriptureBookNormalizer:
             flags=re.IGNORECASE,
         )
         self._context_words = (
-            "chapter",
-            "chap",
-            "verse",
-            "verses",
-            "psalm",
-            "psalms",
-            "book",
-            "books",
+            "chapter", "chap", "verse", "verses", "psalm", "psalms", "book", "books"
         )
 
     # ------------------------------------------------------------------
@@ -166,22 +129,59 @@ class ScriptureBookNormalizer:
             book_num, conf = self.variant_map[found]
             canonical = self.canonical_map[book_num]
 
+            # Debug: log every match
+            if self.debug and self.logger:
+                self.logger.debug({
+                    "step": self.step_id,
+                    "event": "variant_matched",
+                    "variant": found,
+                    "confidence": conf,
+                    "book": book_num,
+                })
+
             # Disabled variant
             if conf == "X":
+                if self.logger:
+                    self.logger.info({
+                        "step": self.step_id,
+                        "event": "variant_skipped_X",
+                        "variant": found,
+                    })
                 return found_original
 
             # High confidence → always replace
             if conf == "H":
+                if self.debug and self.logger:
+                    self.logger.debug({
+                        "step": self.step_id,
+                        "event": "variant_replaced_H",
+                        "variant": found,
+                        "canonical": canonical,
+                    })
                 return canonical
 
             # Low confidence → require scripture context
             if conf == "L":
-                if self._has_scripture_context(text, match.start(), match.end()):
+                has_context = self._has_scripture_context(text, match.start(), match.end())
+
+                if has_context:
+                    if self.logger:
+                        self.logger.info({
+                            "step": self.step_id,
+                            "event": "variant_replaced_L",
+                            "variant": found,
+                            "canonical": canonical,
+                        })
                     return canonical
                 else:
+                    if self.logger:
+                        self.logger.info({
+                            "step": self.step_id,
+                            "event": "variant_rejected_L",
+                            "variant": found,
+                        })
                     return found_original
 
-            # Fallback
             return canonical
 
         return self.variant_regex.sub(replace_variant, text)
@@ -191,28 +191,21 @@ class ScriptureBookNormalizer:
     # ------------------------------------------------------------------
 
     def _has_scripture_context(self, text: str, start: int, end: int) -> bool:
-        """
-        Determine whether a low-confidence variant is being used
-        in a scripture-like context.
-        """
-
         window_radius = 40
         left = max(0, start - window_radius)
         right = min(len(text), end + window_radius)
         context = text[left:right].lower()
 
-        # 1. Colon verse pattern (e.g., "1:3")
         if self._colon_pattern.search(context):
             return True
 
-        # 2. Numbers + context words
         if self._number_pattern.search(context):
             if any(w in context for w in self._context_words):
                 return True
 
-        # 3. "chapter three" / "verse two"
         if self._chapter_word_pattern.search(context):
             return True
+
         if self._verse_word_pattern.search(context):
             return True
 
