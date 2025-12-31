@@ -1,7 +1,21 @@
-# metadata.py
-# Handles speaker name extraction, normalization, and multi-speaker detection.
+"""
+metadata.py
+
+Purpose:
+    Extract speaker names from metadata, normalize them,
+    resolve them against the speaker registry, and update aliases.
+
+This module is dispatcher-ready:
+    - No module calls another module except registry helpers
+    - Uses structured logging (logger.info / logger.debug)
+    - Step-ID aware
+    - Debug toggle
+"""
 
 import re
+from dataclasses import dataclass
+from typing import List, Tuple, Optional
+
 from modules.registry import (
     find_speaker_by_canonical,
     find_speaker_by_alias,
@@ -11,10 +25,26 @@ from modules.registry import (
 
 
 # ---------------------------------------------------------
+# NAME NORMALIZATION
+# ---------------------------------------------------------
+
+def normalize_name(name: str) -> str:
+    """
+    Normalizes a speaker name for comparison.
+    Example:
+        'Alan E. Highers' → 'alan e highers'
+    """
+    name = name.lower().strip()
+    name = re.sub(r"[^\w\s]", "", name)      # remove punctuation
+    name = re.sub(r"\s+", " ", name)         # collapse whitespace
+    return name
+
+
+# ---------------------------------------------------------
 # METADATA EXTRACTION
 # ---------------------------------------------------------
 
-def extract_speaker_names(raw_metadata):
+def extract_speaker_names(raw_metadata: str) -> List[str]:
     """
     Extracts speaker names from raw metadata.
     raw_metadata may come from:
@@ -37,105 +67,135 @@ def extract_speaker_names(raw_metadata):
 
 
 # ---------------------------------------------------------
-# NAME NORMALIZATION
-# ---------------------------------------------------------
-
-def normalize_name(name):
-    """
-    Normalizes a speaker name for comparison.
-    Example:
-        'Alan E. Highers' → 'alan e highers'
-    """
-    name = name.lower().strip()
-    name = re.sub(r"[^\w\s]", "", name)  # remove punctuation
-    name = re.sub(r"\s+", " ", name)     # collapse whitespace
-    return name
-
-
-# ---------------------------------------------------------
 # MULTI-SPEAKER DETECTION
 # ---------------------------------------------------------
 
-def is_multi_speaker(name_list):
-    """
-    Returns True if more than one speaker is listed.
-    """
+def is_multi_speaker(name_list: List[str]) -> bool:
+    """Returns True if more than one speaker is listed."""
     return len(name_list) > 1
 
 
 # ---------------------------------------------------------
-# SPEAKER RESOLUTION
+# DISPATCHER-READY RESOLUTION CLASS
 # ---------------------------------------------------------
 
-def resolve_speakers(registry, raw_names, log_buffer):
-    """
-    Given a list of raw speaker names, resolve them to canonical names.
-    Steps:
-        1. Normalize names
-        2. Try canonical match
-        3. Try alias match
-        4. Create new speaker if needed
-    Returns:
-        - canonical_names: list of canonical speaker names
-        - multi: True/False
-    """
+@dataclass
+class SpeakerResolver:
+    logger: Optional[object] = None
+    step_id: str = "speaker.resolve"
+    debug: bool = False
 
-    canonical_names = []
+    # -----------------------------------------------------
+    # Resolve speakers
+    # -----------------------------------------------------
 
-    for raw in raw_names:
-        norm = normalize_name(raw)
+    def resolve(self, registry: dict, raw_names: List[str]) -> Tuple[List[str], bool]:
+        """
+        Resolve raw speaker names to canonical names.
 
-        # 1. Try canonical match
-        entry = find_speaker_by_canonical(registry, raw)
-        if entry:
-            canonical_names.append(raw)
-            continue
+        Steps:
+            1. Normalize names
+            2. Try canonical match
+            3. Try alias match
+            4. Create new speaker if needed
 
-        # 2. Try alias match
-        alias_match, alias_entry = find_speaker_by_alias(registry, raw)
-        if alias_match:
-            canonical_names.append(alias_match)
-            continue
+        Returns:
+            (canonical_names, multi_speaker_flag)
+        """
 
-        # 3. Try canonical match using normalized name
-        entry = find_speaker_by_canonical(registry, norm)
-        if entry:
-            canonical_names.append(norm)
-            continue
+        canonical_names = []
 
-        # 4. Try alias match using normalized name
-        alias_match, alias_entry = find_speaker_by_alias(registry, norm)
-        if alias_match:
-            canonical_names.append(alias_match)
-            continue
+        for raw in raw_names:
+            norm = normalize_name(raw)
 
-        # 5. No match → create new speaker
-        new_entry = add_new_speaker(registry, raw)
-        canonical_names.append(raw)
+            # Debug logging
+            if self.debug and self.logger:
+                self.logger.debug({
+                    "step": self.step_id,
+                    "event": "normalize_name",
+                    "raw": raw,
+                    "normalized": norm
+                })
 
-        log_buffer.append(f"[INFO] New speaker added to registry: {raw}")
+            # 1. Try canonical match (raw)
+            entry = find_speaker_by_canonical(registry, raw)
+            if entry:
+                canonical_names.append(entry["canonical"])
+                self._log_match("canonical_raw", raw, entry["canonical"])
+                continue
 
-    return canonical_names, is_multi_speaker(canonical_names)
+            # 2. Try alias match (raw)
+            alias_match, alias_entry = find_speaker_by_alias(registry, raw)
+            if alias_match:
+                canonical_names.append(alias_match)
+                self._log_match("alias_raw", raw, alias_match)
+                continue
 
+            # 3. Try canonical match (normalized)
+            entry = find_speaker_by_canonical(registry, norm)
+            if entry:
+                canonical_names.append(entry["canonical"])
+                self._log_match("canonical_norm", raw, entry["canonical"])
+                continue
 
-# ---------------------------------------------------------
-# ALIAS HANDLING
-# ---------------------------------------------------------
+            # 4. Try alias match (normalized)
+            alias_match, alias_entry = find_speaker_by_alias(registry, norm)
+            if alias_match:
+                canonical_names.append(alias_match)
+                self._log_match("alias_norm", raw, alias_match)
+                continue
 
-def update_aliases_if_needed(registry, canonical_name, raw_name, log_buffer):
-    """
-    If raw_name is not the canonical name and not already an alias,
-    add it as an alias.
-    """
+            # 5. No match → create new speaker
+            new_entry = add_new_speaker(registry, raw)
+            canonical_names.append(new_entry["canonical"])
 
-    if normalize_name(raw_name) == normalize_name(canonical_name):
-        return  # identical, no alias needed
+            if self.logger:
+                self.logger.info({
+                    "step": self.step_id,
+                    "event": "new_speaker_added",
+                    "raw_name": raw,
+                    "canonical": new_entry["canonical"]
+                })
 
-    entry = registry.get(canonical_name)
-    if not entry:
-        return
+        return canonical_names, is_multi_speaker(canonical_names)
 
-    aliases = entry.get("aliases", [])
-    if raw_name.lower() not in [a.lower() for a in aliases]:
-        add_alias(registry, canonical_name, raw_name)
-        log_buffer.append(f"[INFO] Alias added: '{raw_name}' → '{canonical_name}'")
+    # -----------------------------------------------------
+    # Alias update
+    # -----------------------------------------------------
+
+    def update_alias(self, registry: dict, canonical_name: str, raw_name: str):
+        """
+        Add raw_name as an alias if it is not identical to the canonical name.
+        """
+
+        if normalize_name(raw_name) == normalize_name(canonical_name):
+            return  # identical, no alias needed
+
+        entry = registry.get(canonical_name)
+        if not entry:
+            return
+
+        aliases = entry.get("aliases", [])
+        if raw_name.lower() not in [a.lower() for a in aliases]:
+            add_alias(registry, canonical_name, raw_name)
+
+            if self.logger:
+                self.logger.info({
+                    "step": self.step_id,
+                    "event": "alias_added",
+                    "raw_name": raw_name,
+                    "canonical": canonical_name
+                })
+
+    # -----------------------------------------------------
+    # Internal logging helper
+    # -----------------------------------------------------
+
+    def _log_match(self, match_type: str, raw: str, canonical: str):
+        if self.logger:
+            self.logger.info({
+                "step": self.step_id,
+                "event": f"match_{match_type}",
+                "raw_name": raw,
+                "canonical": canonical
+            })
